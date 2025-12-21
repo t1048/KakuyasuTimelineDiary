@@ -15,7 +15,32 @@ Amplify.configure({
   }
 });
 
-const CONSENT_VERSION = '2024-10-01';
+const CONSENT_VERSION = '2025-12-21';
+const CONSENT_STORAGE_KEY = 'diary_consent';
+
+const readConsentCache = () => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const stored = localStorage.getItem(CONSENT_STORAGE_KEY);
+    return stored ? JSON.parse(stored) : null;
+  } catch (error) {
+    console.error('同意キャッシュ取得エラー:', error);
+    return null;
+  }
+};
+
+const writeConsentCache = (value) => {
+  if (typeof window === 'undefined') return;
+  try {
+    if (!value) {
+      localStorage.removeItem(CONSENT_STORAGE_KEY);
+      return;
+    }
+    localStorage.setItem(CONSENT_STORAGE_KEY, JSON.stringify(value));
+  } catch (error) {
+    console.error('同意キャッシュ保存エラー:', error);
+  }
+};
 const CONSENT_ITEMS = [
   '日記や予定のデータは暗号化しますが、流出が発生しても運営は責任を負いません。',
   'クライアント端末側で不具合が発生しても運営は責任を負いません。',
@@ -45,7 +70,11 @@ function App() {
   const [templates, setTemplates] = useState([]); // テンプレート一覧
   const [isTemplatePanelOpen, setIsTemplatePanelOpen] = useState(false); // テンプレートパネル表示状態
   const [isStatsOpen, setIsStatsOpen] = useState(false); // 統計パネル表示状態
-  const [consentStatus, setConsentStatus] = useState('loading'); // 'loading', 'required', 'agreed'
+  const [consentStatus, setConsentStatus] = useState(() => {
+    const cached = readConsentCache();
+    if (cached?.agreed && cached?.version === CONSENT_VERSION) return 'agreed';
+    return 'loading';
+  }); // 'loading', 'required', 'agreed'
   const [consentChecked, setConsentChecked] = useState(false);
   const [consentError, setConsentError] = useState('');
   const [consentSubmitting, setConsentSubmitting] = useState(false);
@@ -79,7 +108,7 @@ function App() {
   const getStoredPin = () => (typeof window === 'undefined') ? '' : (sessionStorage.getItem('diaryPin') || '');
   const [pin, setPin] = useState(getStoredPin);
   const [pinInput, setPinInput] = useState(getStoredPin);
-  const [isPinModalOpen, setIsPinModalOpen] = useState(!getStoredPin());
+  const [isPinModalOpen, setIsPinModalOpen] = useState(false);
 
   const getNotificationSettingsKey = () => {
     if (typeof window === 'undefined') return 'diary_notification_settings';
@@ -133,12 +162,21 @@ function App() {
     let cancelled = false;
     const loadConsent = async () => {
       try {
-        setConsentStatus('loading');
+        const cachedConsent = readConsentCache();
+        const hasCachedAgreement = cachedConsent?.agreed && cachedConsent?.version === CONSENT_VERSION;
         setConsentError('');
+        if (!hasCachedAgreement) {
+          setConsentStatus('loading');
+        }
         const data = await getConsent();
         const agreed = data?.agreed && data?.version === CONSENT_VERSION;
         if (!cancelled) {
           setConsentStatus(agreed ? 'agreed' : 'required');
+          if (agreed) {
+            writeConsentCache({ agreed: true, version: CONSENT_VERSION });
+          } else {
+            writeConsentCache(null);
+          }
           if (!agreed && data?.version && data?.version !== CONSENT_VERSION) {
             setConsentError('同意内容が更新されました。再度同意してください。');
           }
@@ -146,8 +184,14 @@ function App() {
       } catch (error) {
         console.error('同意情報の取得エラー:', error);
         if (!cancelled) {
-          setConsentStatus('required');
-          setConsentError('同意情報の取得に失敗しました。通信状態を確認してください。');
+          const cachedConsent = readConsentCache();
+          const hasCachedAgreement = cachedConsent?.agreed && cachedConsent?.version === CONSENT_VERSION;
+          if (hasCachedAgreement) {
+            setConsentStatus('agreed');
+          } else {
+            setConsentStatus('required');
+            setConsentError('同意情報の取得に失敗しました。通信状態を確認してください。');
+          }
         }
       }
     };
@@ -403,6 +447,7 @@ function App() {
     setConsentError('');
     try {
       await setConsent({ agreed: true, version: CONSENT_VERSION });
+      writeConsentCache({ agreed: true, version: CONSENT_VERSION });
       setConsentStatus('agreed');
       setConsentChecked(false);
     } catch (error) {
@@ -1483,212 +1528,214 @@ function App() {
           </main>
 
           {isModalOpen && (
-            <div className="modal-overlay" onClick={closeModal}>
-              <div className="modal" onClick={e => e.stopPropagation()}>
-                <div className="modal-header">
-                  <h2>{editingItem ? '編集' : '新規投稿'}</h2>
-                  <button className="close-btn" onClick={closeModal}>
-                    <X size={20}/>
-                  </button>
-                </div>
-                <form onSubmit={(e) => {
-                  e.preventDefault();
-                  handleSaveItem();
-                }}>
-                  <div className="form-group">
-                    <label>日付</label>
-                    <input type="date" className="input-field" 
-                      value={formData.date} 
-                      onChange={e => setFormData({...formData, date: e.target.value})} required />
-                  </div>
-
-                  {formIsEvent && (
-                    <div className="form-group" style={{display:'flex', gap:10}}>
-                      <div style={{flex:1}}>
-                        <label>開始時間</label>
-                        <input type="time" className="input-field" 
-                          value={formData.startTime} 
-                          onChange={e => setFormData({...formData, startTime: e.target.value})} required />
-                      </div>
-                      <div style={{flex:1}}>
-                        <label>終了時間</label>
-                        <input type="time" className="input-field" 
-                          value={formData.endTime} 
-                          onChange={e => setFormData({...formData, endTime: e.target.value})} />
-                      </div>
+            <div className="form-screen">
+              <div className="form-screen-header">
+                <h2 className="form-screen-title">{editingItem ? '編集' : '新規投稿'}</h2>
+                <button className="close-btn" onClick={closeModal} aria-label="閉じる">
+                  <X size={20}/>
+                </button>
+              </div>
+              <div className="form-screen-body">
+                <div className="form-screen-content">
+                  <form onSubmit={(e) => {
+                    e.preventDefault();
+                    handleSaveItem();
+                  }}>
+                    <div className="form-group">
+                      <label>日付</label>
+                      <input type="date" className="input-field" 
+                        value={formData.date} 
+                        onChange={e => setFormData({...formData, date: e.target.value})} required />
                     </div>
-                  )}
 
-                  <div className="form-group">
-                    <label>タイトル (任意)</label>
-                    <input type="text" className="input-field" placeholder="タイトル" 
-                      value={formData.title} 
-                      onChange={e => setFormData({...formData, title: e.target.value})} />
-                  </div>
-
-                  <div className="form-group">
-                    <label>内容 (ハッシュタグ #日記 / #予定 で種類を決めます)</label>
-                    <textarea
-                      ref={contentTextareaRef}
-                      className="input-field"
-                      rows="6"
-                      placeholder="今なにしてる？ #日記"
-                      value={formData.content}
-                      onChange={e => {
-                        const nextValue = e.target.value;
-                        const cursorPos = e.target.selectionStart || 0;
-                        const query = getHashtagQueryAtCursor(nextValue, cursorPos);
-                        setFormData({...formData, content: nextValue});
-                        if (query !== null) {
-                          setHashtagQuery(query);
-                          setShowTagSuggestions(true);
-                        } else {
-                          setHashtagQuery('');
-                          setShowTagSuggestions(false);
-                        }
-                      }}
-                      onBlur={() => setTimeout(() => setShowTagSuggestions(false), 150)}
-                      onFocus={(e) => {
-                        const cursorPos = e.target.selectionStart || 0;
-                        const query = getHashtagQueryAtCursor(e.target.value, cursorPos);
-                        if (query !== null) {
-                          setHashtagQuery(query);
-                          setShowTagSuggestions(true);
-                        }
-                      }}
-                      required
-                    ></textarea>
-                    <div style={{display: 'flex', gap: '8px', marginTop: '8px'}}>
-                      <button 
-                        type="button" 
-                        className="tag-insert-btn"
-                        onClick={() => insertHashtag('#日記')}
-                      >
-                        <Hash size={14} style={{marginRight: 4}} />
-                        日記
-                      </button>
-                      <button 
-                        type="button" 
-                        className="tag-insert-btn"
-                        onClick={() => insertHashtag('#予定')}
-                      >
-                        <Hash size={14} style={{marginRight: 4}} />
-                        予定
-                      </button>
-                    </div>
-                    {showTagSuggestions && suggestedTags.length > 0 && (
-                      <div className="tag-suggestions">
-                        {suggestedTags.map(tag => (
-                          <button
-                            key={tag}
-                            type="button"
-                            className="tag-suggestion"
-                            onClick={() => insertHashtag(tag)}
-                          >
-                            {tag}
-                          </button>
-                        ))}
+                    {formIsEvent && (
+                      <div className="form-group" style={{display:'flex', gap:10}}>
+                        <div style={{flex:1}}>
+                          <label>開始時間</label>
+                          <input type="time" className="input-field" 
+                            value={formData.startTime} 
+                            onChange={e => setFormData({...formData, startTime: e.target.value})} required />
+                        </div>
+                        <div style={{flex:1}}>
+                          <label>終了時間</label>
+                          <input type="time" className="input-field" 
+                            value={formData.endTime} 
+                            onChange={e => setFormData({...formData, endTime: e.target.value})} />
+                        </div>
                       </div>
                     )}
-                  </div>
 
-                  {!formIsEvent && (
                     <div className="form-group">
-                      <label className="checkbox-label">
-                        <input type="checkbox" 
-                          checked={formData.quickPost} 
-                          onChange={e => setFormData({...formData, quickPost: e.target.checked})} />
-                        短い投稿は確認なしで投稿（{formData.content.length} 字）
-                      </label>
-                      <p style={{fontSize: '0.85rem', color: 'var(--text-secondary)', margin: '4px 0 0'}}>
-                        50字以下の場合、確認画面なしで投稿できます
-                      </p>
+                      <label>タイトル (任意)</label>
+                      <input type="text" className="input-field" placeholder="タイトル" 
+                        value={formData.title} 
+                        onChange={e => setFormData({...formData, title: e.target.value})} />
                     </div>
-                  )}
 
-                  <div className="form-group template-buttons">
-                    {templates.length > 0 && (
+                    <div className="form-group">
+                      <label>内容 (ハッシュタグ #日記 / #予定 で種類を決めます)</label>
+                      <textarea
+                        ref={contentTextareaRef}
+                        className="input-field"
+                        rows="6"
+                        placeholder="今なにしてる？ #日記"
+                        value={formData.content}
+                        onChange={e => {
+                          const nextValue = e.target.value;
+                          const cursorPos = e.target.selectionStart || 0;
+                          const query = getHashtagQueryAtCursor(nextValue, cursorPos);
+                          setFormData({...formData, content: nextValue});
+                          if (query !== null) {
+                            setHashtagQuery(query);
+                            setShowTagSuggestions(true);
+                          } else {
+                            setHashtagQuery('');
+                            setShowTagSuggestions(false);
+                          }
+                        }}
+                        onBlur={() => setTimeout(() => setShowTagSuggestions(false), 150)}
+                        onFocus={(e) => {
+                          const cursorPos = e.target.selectionStart || 0;
+                          const query = getHashtagQueryAtCursor(e.target.value, cursorPos);
+                          if (query !== null) {
+                            setHashtagQuery(query);
+                            setShowTagSuggestions(true);
+                          }
+                        }}
+                        required
+                      ></textarea>
+                      <div style={{display: 'flex', gap: '8px', marginTop: '8px'}}>
+                        <button 
+                          type="button" 
+                          className="tag-insert-btn"
+                          onClick={() => insertHashtag('#日記')}
+                        >
+                          <Hash size={14} style={{marginRight: 4}} />
+                          日記
+                        </button>
+                        <button 
+                          type="button" 
+                          className="tag-insert-btn"
+                          onClick={() => insertHashtag('#予定')}
+                        >
+                          <Hash size={14} style={{marginRight: 4}} />
+                          予定
+                        </button>
+                      </div>
+                      {showTagSuggestions && suggestedTags.length > 0 && (
+                        <div className="tag-suggestions">
+                          {suggestedTags.map(tag => (
+                            <button
+                              key={tag}
+                              type="button"
+                              className="tag-suggestion"
+                              onClick={() => insertHashtag(tag)}
+                            >
+                              {tag}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {!formIsEvent && (
+                      <div className="form-group">
+                        <label className="checkbox-label">
+                          <input type="checkbox" 
+                            checked={formData.quickPost} 
+                            onChange={e => setFormData({...formData, quickPost: e.target.checked})} />
+                          短い投稿は確認なしで投稿（{formData.content.length} 字）
+                        </label>
+                        <p style={{fontSize: '0.85rem', color: 'var(--text-secondary)', margin: '4px 0 0'}}>
+                          50字以下の場合、確認画面なしで投稿できます
+                        </p>
+                      </div>
+                    )}
+
+                    <div className="form-group template-buttons">
+                      {templates.length > 0 && (
+                        <button 
+                          type="button"
+                          className="template-btn"
+                          onClick={() => setIsTemplatePanelOpen(!isTemplatePanelOpen)}
+                        >
+                          📋 テンプレート ({templates.length})
+                        </button>
+                      )}
                       <button 
                         type="button"
                         className="template-btn"
-                        onClick={() => setIsTemplatePanelOpen(!isTemplatePanelOpen)}
-                      >
-                        📋 テンプレート ({templates.length})
-                      </button>
-                    )}
-                    <button 
-                      type="button"
-                      className="template-btn"
-                      onClick={() => {
-                        const name = prompt('テンプレート名を入力してください:');
-                        if (name) {
-                          saveTemplate({
-                            name,
-                            isEvent: formIsEvent,
-                            title: formData.title,
-                            content: formData.content,
-                            startTime: formData.startTime,
-                            endTime: formData.endTime
-                          });
-                          setTemplates(getTemplates());
-                          alert('テンプレートを保存しました！');
-                        }
-                      }}
-                    >
-                      ⭐ 現在の内容を保存
-                    </button>
-                  </div>
-
-                  <button type="submit" className="submit-btn">投稿する</button>
-                </form>
-
-                {isTemplatePanelOpen && templates.length > 0 && (
-                  <div className="template-panel">
-                    <h4>テンプレート一覧</h4>
-                    <div className="template-list">
-                      {templates.map(template => (
-                        <button
-                          key={template.id}
-                          type="button"
-                          className="template-item"
-                          onClick={() => {
-                            const templateIsEvent = template.isEvent || hasTag(extractHashtags(template.content || ''), '#予定');
-                            const nextContent = templateIsEvent ? ensureTag(template.content, '#予定') : template.content;
-                            setFormData({
-                              date: formData.date,
-                              startTime: template.startTime || formData.startTime,
-                              endTime: template.endTime || '',
-                              title: template.title,
-                              content: nextContent,
-                              quickPost: formData.quickPost
+                        onClick={() => {
+                          const name = prompt('テンプレート名を入力してください:');
+                          if (name) {
+                            saveTemplate({
+                              name,
+                              isEvent: formIsEvent,
+                              title: formData.title,
+                              content: formData.content,
+                              startTime: formData.startTime,
+                              endTime: formData.endTime
                             });
-                            setIsTemplatePanelOpen(false);
-                          }}
-                        >
-                          <div className="template-item-content">
-                            <div className="template-name">{template.name}</div>
-                            <div className="template-type">
-                              {(template.isEvent || hasTag(extractHashtags(template.content || ''), '#予定')) ? '📌 予定' : '📝 日記'}
-                            </div>
-                          </div>
+                            setTemplates(getTemplates());
+                            alert('テンプレートを保存しました！');
+                          }
+                        }}
+                      >
+                        ⭐ 現在の内容を保存
+                      </button>
+                    </div>
+
+                    <button type="submit" className="submit-btn">投稿する</button>
+                  </form>
+
+                  {isTemplatePanelOpen && templates.length > 0 && (
+                    <div className="template-panel">
+                      <h4>テンプレート一覧</h4>
+                      <div className="template-list">
+                        {templates.map(template => (
                           <button
+                            key={template.id}
                             type="button"
-                            className="template-delete-btn"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (confirm('テンプレートを削除しますか？')) {
-                                deleteTemplate(template.id);
-                                setTemplates(getTemplates());
-                              }
+                            className="template-item"
+                            onClick={() => {
+                              const templateIsEvent = template.isEvent || hasTag(extractHashtags(template.content || ''), '#予定');
+                              const nextContent = templateIsEvent ? ensureTag(template.content, '#予定') : template.content;
+                              setFormData({
+                                date: formData.date,
+                                startTime: template.startTime || formData.startTime,
+                                endTime: template.endTime || '',
+                                title: template.title,
+                                content: nextContent,
+                                quickPost: formData.quickPost
+                              });
+                              setIsTemplatePanelOpen(false);
                             }}
                           >
-                            ✕
+                            <div className="template-item-content">
+                              <div className="template-name">{template.name}</div>
+                              <div className="template-type">
+                                {(template.isEvent || hasTag(extractHashtags(template.content || ''), '#予定')) ? '📌 予定' : '📝 日記'}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              className="template-delete-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (confirm('テンプレートを削除しますか？')) {
+                                  deleteTemplate(template.id);
+                                  setTemplates(getTemplates());
+                                }
+                              }}
+                            >
+                              ✕
+                            </button>
                           </button>
-                        </button>
-                      ))}
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -2036,7 +2083,7 @@ function App() {
             </div>
           )}
 
-          {isPinModalOpen && (
+          {consentIsAgreed && isPinModalOpen && (
             <div className="modal-overlay" onClick={() => {}}>
               <div className="modal pin-modal">
                 <div className="modal-header">
@@ -2073,9 +2120,11 @@ function App() {
             </div>
           )}
           </div>
-          <button className="fab" onClick={openCreateModal} title="投稿を追加">
-            <Plus size={32} strokeWidth={3} />
-          </button>
+          {consentIsAgreed && !isPinModalOpen && !isModalOpen && (
+            <button className="fab" onClick={openCreateModal} title="投稿を追加">
+              <Plus size={32} strokeWidth={3} />
+            </button>
+          )}
     </>
   );
 }

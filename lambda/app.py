@@ -11,7 +11,7 @@ dynamodb = boto3.resource('dynamodb')
 table_name = os.environ.get('TABLE_NAME', 'KakuyasuTimelineDiary')
 table = dynamodb.Table(table_name)
 
-CONSENT_VERSION = "2024-10-01"
+CONSENT_VERSION = "2025-12-21"
 
 # Decimal型をJSONシリアライズするためのエンコーダー
 class DecimalEncoder(json.JSONEncoder):
