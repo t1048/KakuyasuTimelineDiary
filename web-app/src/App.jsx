@@ -1,0 +1,2083 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Amplify } from 'aws-amplify';
+import { useAuthenticator } from '@aws-amplify/ui-react';
+import '@aws-amplify/ui-react/styles.css';
+import { getItems, createItem, deleteItem, getConsent, setConsent, getTemplates, saveTemplate, deleteTemplate, generateRecurringInstancesForDate, getOutbox, enqueueOutboxEntry, removeOutboxEntry, updateOutboxEntry } from './api';
+import { Calendar, Clock, Trash2, Plus, X, LogOut, FileText, ChevronLeft, ChevronRight, KeyRound, AlertCircle, List, Settings, Pencil, Hash, CalendarDays } from 'lucide-react';
+import './App.css';
+
+Amplify.configure({
+  Auth: {
+    Cognito: {
+      userPoolId: import.meta.env.VITE_USER_POOL_ID,
+      userPoolClientId: import.meta.env.VITE_USER_POOL_CLIENT_ID,
+    }
+  }
+});
+
+const CONSENT_VERSION = '2024-10-01';
+const CONSENT_ITEMS = [
+  '日記や予定のデータは暗号化しますが、流出が発生しても運営は責任を負いません。',
+  'クライアント端末側で不具合が発生しても運営は責任を負いません。',
+  'セキュリティ関連で秘密保持契約（NDA）を結んでいる情報は入力しないでください。',
+  'メールアドレスや電話番号の入力が必要です。本人の同意なしに第三者提供はしませんが、アプリの維持が困難な場合は寄付のお願いを連絡する可能性があります。'
+];
+
+function App() {
+  const { user, signOut } = useAuthenticator();
+  const userIdRaw = user?.userId || user?.username || '';
+  const userIdLabel = userIdRaw ? userIdRaw.slice(-5) : 'unknown';
+  const [records, setRecords] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [previewItem, setPreviewItem] = useState(null);
+  const [editingItem, setEditingItem] = useState(null);
+  const [cryptoError, setCryptoError] = useState('');
+  const [viewMode, setViewMode] = useState('timeline'); // 'timeline', 'calendar', 'week'
+  const [filterTag, setFilterTag] = useState(null);
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [isDayModalOpen, setIsDayModalOpen] = useState(false);
+  const [dateRangeFilter, setDateRangeFilter] = useState('all'); // 'all', 'today', 'week', 'month'
+  const [typeFilter, setTypeFilter] = useState('note'); // 'all', 'note', 'event'
+  const [searchQuery, setSearchQuery] = useState('');
+  const [weekViewStartDate, setWeekViewStartDate] = useState(new Date()); // 週間ビューの開始日付
+  const [templates, setTemplates] = useState([]); // テンプレート一覧
+  const [isTemplatePanelOpen, setIsTemplatePanelOpen] = useState(false); // テンプレートパネル表示状態
+  const [isStatsOpen, setIsStatsOpen] = useState(false); // 統計パネル表示状態
+  const [consentStatus, setConsentStatus] = useState('loading'); // 'loading', 'required', 'agreed'
+  const [consentChecked, setConsentChecked] = useState(false);
+  const [consentError, setConsentError] = useState('');
+  const [consentSubmitting, setConsentSubmitting] = useState(false);
+  const [hashtagQuery, setHashtagQuery] = useState('');
+  const [showTagSuggestions, setShowTagSuggestions] = useState(false);
+  const notificationSupported = typeof window !== 'undefined' && 'Notification' in window;
+  // データキャッシュ: キーは "YYYY-MM" 形式
+  const [dataCache, setDataCache] = useState({});
+  const [outbox, setOutbox] = useState(() => getOutbox());
+  const [syncState, setSyncState] = useState('idle'); // 'idle', 'syncing', 'error'
+  const [isOnline, setIsOnline] = useState(() => {
+    if (typeof navigator === 'undefined') return true;
+    return navigator.onLine;
+  });
+  const syncInProgressRef = useRef(false);
+  const contentTextareaRef = useRef(null);
+  
+  const today = new Date();
+  const [currentYear, setCurrentYear] = useState(today.getFullYear());
+  const [currentMonth, setCurrentMonth] = useState(today.getMonth() + 1);
+
+  const [formData, setFormData] = useState({
+    date: new Date().toISOString().split('T')[0],
+    startTime: '',
+    endTime: '',
+    title: '',
+    content: '',
+    quickPost: false
+  });
+
+  const getStoredPin = () => (typeof window === 'undefined') ? '' : (sessionStorage.getItem('diaryPin') || '');
+  const [pin, setPin] = useState(getStoredPin);
+  const [pinInput, setPinInput] = useState(getStoredPin);
+  const [isPinModalOpen, setIsPinModalOpen] = useState(!getStoredPin());
+
+  const getNotificationSettingsKey = () => {
+    if (typeof window === 'undefined') return 'diary_notification_settings';
+    return `diary_notification_settings:${window.location.origin}`;
+  };
+
+  const getDefaultNotificationSettings = () => ({
+    enabled: false,
+    diaryTime: '21:00',
+    diaryMaxPerDay: 1,
+    eventLeadMinutes: 30,
+    lastDiaryNotifiedDate: '',
+    recentEventNotifyKeys: []
+  });
+
+  const loadNotificationSettings = () => {
+    const defaults = getDefaultNotificationSettings();
+    if (typeof window === 'undefined') return defaults;
+    try {
+      const stored = localStorage.getItem(getNotificationSettingsKey());
+      if (!stored) return defaults;
+      const parsed = JSON.parse(stored);
+      return { ...defaults, ...parsed };
+    } catch (error) {
+      console.error('通知設定の読み込みエラー:', error);
+      return defaults;
+    }
+  };
+
+  const [notificationSettings, setNotificationSettings] = useState(loadNotificationSettings);
+  const [notificationPermission, setNotificationPermission] = useState(() => {
+    if (!notificationSupported) return 'unsupported';
+    return Notification.permission;
+  });
+  const [notificationError, setNotificationError] = useState('');
+  const notificationPermissionLabel = {
+    granted: '許可済み',
+    denied: '拒否',
+    default: '未確認',
+    unsupported: '未対応'
+  }[notificationPermission] || '未確認';
+  const consentIsAgreed = consentStatus === 'agreed';
+  const consentBusy = consentStatus === 'loading' || consentSubmitting;
+
+  useEffect(() => {
+    if (pin) sessionStorage.setItem('diaryPin', pin);
+    else sessionStorage.removeItem('diaryPin');
+  }, [pin]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadConsent = async () => {
+      try {
+        setConsentStatus('loading');
+        setConsentError('');
+        const data = await getConsent();
+        const agreed = data?.agreed && data?.version === CONSENT_VERSION;
+        if (!cancelled) {
+          setConsentStatus(agreed ? 'agreed' : 'required');
+          if (!agreed && data?.version && data?.version !== CONSENT_VERSION) {
+            setConsentError('同意内容が更新されました。再度同意してください。');
+          }
+        }
+      } catch (error) {
+        console.error('同意情報の取得エラー:', error);
+        if (!cancelled) {
+          setConsentStatus('required');
+          setConsentError('同意情報の取得に失敗しました。通信状態を確認してください。');
+        }
+      }
+    };
+    loadConsent();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!consentIsAgreed) {
+      setIsPinModalOpen(false);
+      return;
+    }
+    if (!pin) setIsPinModalOpen(true);
+  }, [consentIsAgreed, pin]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.setItem(getNotificationSettingsKey(), JSON.stringify(notificationSettings));
+    } catch (error) {
+      console.error('通知設定の保存エラー:', error);
+    }
+  }, [notificationSettings]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  const textEncoder = useMemo(() => new TextEncoder(), []);
+  const textDecoder = useMemo(() => new TextDecoder(), []);
+
+  const toBase64 = (buffer) => btoa(String.fromCharCode(...new Uint8Array(buffer)));
+  const fromBase64 = (str) => Uint8Array.from(atob(str), (c) => c.charCodeAt(0));
+  const extractDateFromSk = (sk) => {
+    const match = /^DATE#(\d{4}-\d{2}-\d{2})/.exec(sk || '');
+    return match ? match[1] : '';
+  };
+
+  const hasTag = (tags, tagName) => (tags || []).some(tag => tag.name === tagName);
+  const inferItemKind = (item) => {
+    if (hasTag(item.tag, '#予定')) return 'event';
+    if (hasTag(item.tag, '#日記')) return 'note';
+    if (item.startTime) return 'event';
+    return 'note';
+  };
+  const isEventItem = (item) => inferItemKind(item) === 'event';
+  const ensureTag = (content, tag) => {
+    if (!content) return tag;
+    if (content.includes(tag)) return content;
+    return `${content} ${tag}`;
+  };
+
+  const deriveKey = async (pinCode, salt) => {
+    const keyMaterial = await crypto.subtle.importKey('raw', textEncoder.encode(pinCode), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt, iterations: 120000, hash: 'SHA-256' },
+      keyMaterial,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt']
+    );
+  };
+
+  const encryptText = async (pinCode, plainText) => {
+    if (!plainText) return '';
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveKey(pinCode, salt);
+    const cipherBuffer = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv },
+      key,
+      textEncoder.encode(plainText)
+    );
+    return `enc:v1:${toBase64(salt)}:${toBase64(iv)}:${toBase64(cipherBuffer)}`;
+  };
+
+  const decryptText = async (pinCode, cipherText) => {
+    if (!cipherText || !cipherText.startsWith('enc:v1:')) return cipherText;
+    try {
+      const parts = cipherText.split(':');
+      if (parts.length < 5) return cipherText;
+      const [, , saltB64, ivB64, dataB64] = parts;
+      const salt = fromBase64(saltB64);
+      const iv = fromBase64(ivB64);
+      const data = fromBase64(dataB64);
+      const key = await deriveKey(pinCode, salt);
+      const plainBuffer = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv },
+        key,
+        data
+      );
+      return textDecoder.decode(plainBuffer);
+    } catch (e) {
+      console.error("Decrypt failed", e);
+      throw e;
+    }
+  };
+
+  const updateNotificationSettings = (updates) => {
+    setNotificationSettings(prev => ({ ...prev, ...updates }));
+  };
+
+  const requestNotificationPermission = async () => {
+    if (!notificationSupported) {
+      setNotificationPermission('unsupported');
+      return 'unsupported';
+    }
+    const result = await Notification.requestPermission();
+    setNotificationPermission(result);
+    return result;
+  };
+
+  const showNotification = (title, options) => {
+    if (!notificationSupported || Notification.permission !== 'granted') return false;
+    try {
+      new Notification(title, options);
+      return true;
+    } catch (error) {
+      console.error('通知表示エラー:', error);
+      return false;
+    }
+  };
+
+  const isTimeMatch = (timeStr, date) => {
+    if (!timeStr) return false;
+    const [hours, minutes] = timeStr.split(':').map(Number);
+    return date.getHours() === hours && date.getMinutes() === minutes;
+  };
+
+  const buildRecurringInstances = (daysAhead = 30) => {
+    const instances = [];
+    const base = new Date();
+    for (let i = 0; i <= daysAhead; i++) {
+      const date = new Date(base);
+      date.setDate(base.getDate() + i);
+      const dateStr = date.toISOString().split('T')[0];
+      instances.push(...generateRecurringInstancesForDate(dateStr));
+    }
+    return instances;
+  };
+
+  const getUpcomingEventCandidates = () => {
+    const fromRecords = timelineItems
+      .filter(item => isEventItem(item) && item.startTime)
+      .map(item => ({
+        id: item.id,
+        title: item.name || '予定',
+        content: item.content || '',
+        startTime: item.startTime
+      }));
+    const fromRecurring = buildRecurringInstances().map(item => ({
+      id: item.id,
+      title: item.title || '予定',
+      content: item.content || '',
+      startTime: item.startTime
+    }));
+    return [...fromRecords, ...fromRecurring];
+  };
+
+  const maybeSendDiaryReminder = async () => {
+    if (!consentIsAgreed) return;
+    if (!notificationSettings.enabled || notificationPermission !== 'granted') return;
+    const now = new Date();
+    if (!isTimeMatch(notificationSettings.diaryTime, now)) return;
+    const todayStr = now.toISOString().split('T')[0];
+    if (notificationSettings.lastDiaryNotifiedDate === todayStr) return;
+
+    const [year, month] = todayStr.split('-');
+    try {
+      const items = await getItems(parseInt(year, 10), parseInt(month, 10));
+      const dayRecord = items.find(r => (extractDateFromSk(r.sk) || r.date) === todayStr);
+      const dayItems = dayRecord?.orderedItems || [];
+      const hasDiary = dayItems.some(item => inferItemKind(item) === 'note');
+      if (!hasDiary) {
+        const sent = showNotification('日記のリマインダー', {
+          body: '今日の日記がまだ未入力です。',
+          tag: 'diary-reminder'
+        });
+        if (sent) {
+          updateNotificationSettings({ lastDiaryNotifiedDate: todayStr });
+        }
+      } else {
+        updateNotificationSettings({ lastDiaryNotifiedDate: todayStr });
+      }
+    } catch (error) {
+      console.error('日記チェックエラー:', error);
+    }
+  };
+
+  const maybeSendEventReminders = () => {
+    if (!consentIsAgreed) return;
+    if (!notificationSettings.enabled || notificationPermission !== 'granted') return;
+    const now = new Date();
+    const leadMinutes = Number(notificationSettings.eventLeadMinutes) || 30;
+    const candidates = getUpcomingEventCandidates();
+    const readyEvents = candidates
+      .map(event => {
+        const start = new Date(event.startTime);
+        if (Number.isNaN(start.getTime())) return null;
+        const notifyAt = new Date(start.getTime() - leadMinutes * 60 * 1000);
+        return {
+          ...event,
+          start,
+          notifyAt,
+          key: `${event.id}:${event.startTime}`
+        };
+      })
+      .filter(Boolean)
+      .filter(event => now >= event.notifyAt && now < event.start);
+
+    if (readyEvents.length === 0) return;
+
+    const recentKeys = Array.isArray(notificationSettings.recentEventNotifyKeys)
+      ? notificationSettings.recentEventNotifyKeys
+      : [];
+    const nextKeys = [...recentKeys];
+
+    readyEvents.forEach(event => {
+      if (recentKeys.includes(event.key)) return;
+      const minutesLeft = Math.max(1, Math.round((event.start - now) / 60000));
+      const sent = showNotification('予定のリマインダー', {
+        body: `${event.title} の開始まであと${minutesLeft}分です。`,
+        tag: `event-reminder-${event.key}`
+      });
+      if (sent) {
+        nextKeys.push(event.key);
+      }
+    });
+
+    if (nextKeys.length !== recentKeys.length) {
+      updateNotificationSettings({
+        recentEventNotifyKeys: nextKeys.slice(-50)
+      });
+    }
+  };
+
+  const submitConsent = async () => {
+    if (!consentChecked) {
+      setConsentError('同意にチェックを入れてください。');
+      return;
+    }
+    setConsentSubmitting(true);
+    setConsentError('');
+    try {
+      await setConsent({ agreed: true, version: CONSENT_VERSION });
+      setConsentStatus('agreed');
+      setConsentChecked(false);
+    } catch (error) {
+      console.error('同意保存エラー:', error);
+      setConsentError('同意の保存に失敗しました。通信状態を確認してください。');
+    } finally {
+      setConsentSubmitting(false);
+    }
+  };
+
+  const loadData = async (forceReload = false) => {
+    if (!pin || !consentIsAgreed) return;
+    
+    const cacheKey = `${currentYear}-${String(currentMonth).padStart(2, '0')}`;
+    
+    // キャッシュがある場合は、それを使用（強制リロード以外）
+    if (!forceReload && dataCache[cacheKey]) {
+      const merged = applyOutboxOverlay(dataCache[cacheKey], getOutbox(), cacheKey);
+      setRecords(merged);
+      setLoading(false);
+      return;
+    }
+    
+    try {
+      setCryptoError('');
+      setLoading(true);
+      const data = await getItems(currentYear, currentMonth);
+      
+      // Decrypt all items in orderedItems
+      const decryptedRecords = await Promise.all(data.map(async (dayRecord) => {
+        const recordDate = extractDateFromSk(dayRecord.sk) || dayRecord.date;
+        const items = dayRecord.orderedItems || [];
+        const decryptedItems = await Promise.all(items.map(async (item) => {
+          try {
+            return {
+              ...item,
+              name: await decryptText(pin, item.name),
+              content: await decryptText(pin, item.content),
+              decrypted: true
+            };
+          } catch (e) {
+            return {
+              ...item,
+              name: '🔒 Encrypted',
+              content: 'Decryption failed',
+              decrypted: false
+            };
+          }
+        }));
+        return { ...dayRecord, date: recordDate, orderedItems: decryptedItems };
+      }));
+      
+      const merged = applyOutboxOverlay(decryptedRecords, getOutbox(), cacheKey);
+      setRecords(merged);
+      // キャッシュに保存
+      setDataCache(prev => ({ ...prev, [cacheKey]: merged }));
+    } catch (e) { console.error(e); } finally { setLoading(false); }
+  };
+
+  useEffect(() => { if (pin && consentIsAgreed) loadData(); }, [currentYear, currentMonth, pin, consentIsAgreed]);
+
+  useEffect(() => {
+    if (!isOnline || !pin || !consentIsAgreed || outbox.length === 0) return;
+    flushOutbox();
+    const intervalId = setInterval(() => {
+      flushOutbox();
+    }, 30000);
+    return () => clearInterval(intervalId);
+  }, [isOnline, pin, consentIsAgreed, outbox.length]);
+
+  useEffect(() => {
+    // テンプレート読み込み
+    const loadedTemplates = getTemplates();
+    setTemplates(loadedTemplates);
+  }, []);
+
+  const prevMonth = () => {
+    if (currentMonth === 1) {
+      setCurrentYear(y => y - 1);
+      setCurrentMonth(12);
+    } else {
+      setCurrentMonth(m => m - 1);
+    }
+  };
+
+  const nextMonth = () => {
+    if (currentMonth === 12) {
+      setCurrentYear(y => y + 1);
+      setCurrentMonth(1);
+    } else {
+      setCurrentMonth(m => m + 1);
+    }
+  };
+
+  // Flatten records to timeline items
+  const timelineItems = useMemo(() => {
+    const allItems = [];
+    records.forEach(day => {
+      (day.orderedItems || []).forEach(item => {
+        // Avoid duplicates if item spans multiple days (check ID)
+        if (!allItems.find(i => i.id === item.id)) {
+          allItems.push({ ...item, date: day.date });
+        }
+      });
+    });
+    // Sort by published/startTime desc
+    return allItems.sort((a, b) => {
+      const timeA = a.startTime || a.published || a.date;
+      const timeB = b.startTime || b.published || b.date;
+      return timeB.localeCompare(timeA);
+    });
+  }, [records]);
+
+  useEffect(() => {
+    if (!consentIsAgreed) return;
+    if (!notificationSettings.enabled || notificationPermission !== 'granted') return;
+    const tick = () => {
+      maybeSendDiaryReminder();
+      maybeSendEventReminders();
+    };
+    tick();
+    const intervalId = setInterval(tick, 60000);
+    return () => clearInterval(intervalId);
+  }, [
+    notificationSettings.enabled,
+    notificationSettings.diaryTime,
+    notificationSettings.eventLeadMinutes,
+    notificationSettings.lastDiaryNotifiedDate,
+    notificationSettings.recentEventNotifyKeys,
+    notificationPermission,
+    consentIsAgreed,
+    timelineItems
+  ]);
+
+  // Extract unique tags
+  const availableTags = useMemo(() => {
+    const tags = new Set();
+    timelineItems.forEach(item => {
+      (item.tag || []).forEach(t => tags.add(t.name));
+    });
+    return Array.from(tags).sort();
+  }, [timelineItems]);
+
+  const filteredItems = useMemo(() => {
+    let items = timelineItems;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // 日付範囲フィルター
+    if (dateRangeFilter !== 'all') {
+      items = items.filter(item => {
+        const itemDate = new Date(item.startTime || item.published || item.date);
+        itemDate.setHours(0, 0, 0, 0);
+
+        if (dateRangeFilter === 'today') {
+          return itemDate.getTime() === today.getTime();
+        } else if (dateRangeFilter === 'week') {
+          const weekStart = new Date(today);
+          weekStart.setDate(today.getDate() - today.getDay());
+          const weekEnd = new Date(weekStart);
+          weekEnd.setDate(weekStart.getDate() + 6);
+          weekEnd.setHours(23, 59, 59, 999);
+          return itemDate >= weekStart && itemDate <= weekEnd;
+        } else if (dateRangeFilter === 'month') {
+          return itemDate.getMonth() === today.getMonth() && itemDate.getFullYear() === today.getFullYear();
+        }
+        return true;
+      });
+    }
+
+    // タイプフィルター
+    if (typeFilter !== 'all') {
+      items = items.filter(item => {
+        const kind = inferItemKind(item);
+        if (typeFilter === 'note') return kind === 'note';
+        if (typeFilter === 'event') return kind === 'event';
+        return true;
+      });
+    }
+
+    // ハッシュタグフィルター
+    if (filterTag) {
+      items = items.filter(item => (item.tag || []).some(t => t.name === filterTag));
+    }
+
+    // テキスト検索
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase();
+      items = items.filter(item => {
+        const titleMatch = (item.name || '').toLowerCase().includes(query);
+        const contentMatch = (item.content || '').toLowerCase().includes(query);
+        return titleMatch || contentMatch;
+      });
+    }
+
+    return items;
+  }, [timelineItems, filterTag, dateRangeFilter, typeFilter, searchQuery]);
+
+  const calendarDays = useMemo(() => {
+    const days = [];
+    const firstDay = new Date(currentYear, currentMonth - 1, 1);
+    const lastDay = new Date(currentYear, currentMonth, 0);
+    
+    // Previous month padding
+    const startPadding = firstDay.getDay(); // 0 (Sun) to 6 (Sat)
+    for (let i = startPadding - 1; i >= 0; i--) {
+      const d = new Date(currentYear, currentMonth - 1, -i);
+      days.push({
+        date: d.toISOString().split('T')[0],
+        day: d.getDate(),
+        isCurrentMonth: false
+      });
+    }
+    
+    // Current month days
+    for (let i = 1; i <= lastDay.getDate(); i++) {
+      const d = new Date(currentYear, currentMonth - 1, i);
+      const dateStr = d.toISOString().split('T')[0];
+      days.push({
+        date: dateStr,
+        day: i,
+        isCurrentMonth: true,
+        items: records.find(r => r.date === dateStr)?.orderedItems || []
+      });
+    }
+    
+    // Next month padding to complete the week
+    const remaining = 7 - (days.length % 7);
+    if (remaining < 7) {
+      for (let i = 1; i <= remaining; i++) {
+        const d = new Date(currentYear, currentMonth, i);
+        days.push({
+          date: d.toISOString().split('T')[0],
+          day: i,
+          isCurrentMonth: false
+        });
+      }
+    }
+    
+    return days;
+  }, [currentYear, currentMonth, records]);
+
+  // 週間ビュー用データ計算
+  const weekViewDays = useMemo(() => {
+    const days = [];
+    const startDate = new Date(weekViewStartDate);
+    startDate.setDate(startDate.getDate() - startDate.getDay()); // 日曜から開始
+    
+    for (let i = 0; i < 7; i++) {
+      const date = new Date(startDate);
+      date.setDate(startDate.getDate() + i);
+      const dateStr = date.toISOString().split('T')[0];
+      const dayRecord = records.find(r => r.date === dateStr);
+      
+      days.push({
+        date: dateStr,
+        day: date.getDate(),
+        dayOfWeek: ['日', '月', '火', '水', '木', '金', '土'][date.getDay()],
+        items: dayRecord?.orderedItems || [],
+        isToday: dateStr === new Date().toISOString().split('T')[0]
+      });
+    }
+    
+    return days;
+  }, [weekViewStartDate, records]);
+
+  // 統計データ計算
+  const statistics = useMemo(() => {
+    const today = new Date();
+    const currentYear = today.getFullYear();
+    const currentMonth = today.getMonth() + 1;
+    const monthStr = `${currentYear}-${String(currentMonth).padStart(2, '0')}`;
+
+    // 当月のデータ取得
+    const monthRecords = records.filter(r => r.date.startsWith(monthStr));
+    
+    // 投稿数の計算
+    const notes = timelineItems.filter(i => inferItemKind(i) === 'note' && i.date.startsWith(monthStr));
+    const events = timelineItems.filter(i => inferItemKind(i) === 'event' && i.date.startsWith(monthStr));
+    
+    // タグの頻出度計算
+    const tagFrequency = {};
+    timelineItems.forEach(item => {
+      if (item.date.startsWith(monthStr)) {
+        (item.tag || []).forEach(t => {
+          tagFrequency[t.name] = (tagFrequency[t.name] || 0) + 1;
+        });
+      }
+    });
+    const topTags = Object.entries(tagFrequency)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([name]) => name);
+
+    // 連続投稿日数を計算
+    let consecutiveDays = 0;
+    let checkDate = new Date(today);
+    checkDate.setHours(0, 0, 0, 0);
+    
+    while (true) {
+      const dateStr = checkDate.toISOString().split('T')[0];
+      const hasPost = records.some(r => r.date === dateStr && (r.orderedItems || []).length > 0);
+      if (!hasPost) break;
+      consecutiveDays++;
+      checkDate.setDate(checkDate.getDate() - 1);
+    }
+
+    // 平均文字数を計算
+    const totalChars = notes.reduce((sum, note) => sum + (note.content?.length || 0), 0);
+    const avgChars = notes.length > 0 ? Math.round(totalChars / notes.length) : 0;
+
+    return {
+      notes: notes.length,
+      events: events.length,
+      topTags,
+      consecutiveDays,
+      avgChars,
+      monthStr
+    };
+  }, [timelineItems, records]);
+
+  const resetPin = () => {
+    setPin('');
+    setPinInput('');
+    setRecords([]);
+    setDataCache({}); // キャッシュをクリア
+    setIsPinModalOpen(true);
+  };
+
+  const ensurePin = () => {
+    if (!pin) {
+      setCryptoError('パスワードが設定されていません');
+      setIsPinModalOpen(true);
+      return false;
+    }
+    return true;
+  };
+
+  const createQueueId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const currentMonthKey = `${currentYear}-${String(currentMonth).padStart(2, '0')}`;
+
+  const getItemDate = (item) => {
+    if (item.startTime) return item.startTime.split('T')[0];
+    if (item.published) return item.published.split('T')[0];
+    return item.date || '';
+  };
+
+  const buildDraftFromForm = (baseId) => {
+    const tags = extractHashtags(formData.content);
+    const isEvent = hasTag(tags, '#予定');
+    const id = baseId || (crypto.randomUUID ? crypto.randomUUID() : createQueueId());
+    const draft = {
+      id,
+      name: formData.title,
+      content: formData.content,
+      tag: tags,
+      date: formData.date
+    };
+
+    if (isEvent) {
+      draft.startTime = `${formData.date}T${formData.startTime || '00:00'}:00`;
+      if (formData.endTime) {
+        draft.endTime = `${formData.date}T${formData.endTime}:00`;
+      }
+    } else {
+      const nowTime = new Date().toTimeString().slice(0, 8);
+      draft.published = `${formData.date}T${nowTime}`;
+    }
+
+    return draft;
+  };
+
+  const buildPayloadFromDraft = async (draft) => {
+    const payload = {
+      id: draft.id,
+      name: await encryptText(pin, draft.name),
+      content: await encryptText(pin, draft.content),
+      tag: draft.tag
+    };
+
+    if (draft.startTime) {
+      payload.startTime = draft.startTime;
+      if (draft.endTime) payload.endTime = draft.endTime;
+    } else {
+      payload.published = draft.published;
+    }
+
+    return payload;
+  };
+
+  const updateRecordsWithItem = (draft) => {
+    const itemDate = getItemDate(draft);
+    if (!itemDate) return;
+    const updateDayRecords = (recordList) => {
+      let found = false;
+      const next = recordList.map((day) => {
+        const filtered = (day.orderedItems || []).filter((item) => item.id !== draft.id);
+        if (day.date === itemDate) {
+          found = true;
+          return { ...day, orderedItems: [...filtered, draft] };
+        }
+        return { ...day, orderedItems: filtered };
+      });
+      if (!found) {
+        next.push({ date: itemDate, orderedItems: [draft] });
+      }
+      return next;
+    };
+
+    const monthKey = `${itemDate.split('-')[0]}-${itemDate.split('-')[1]}`;
+    setRecords((prev) => (monthKey === currentMonthKey ? updateDayRecords(prev) : prev));
+    setDataCache((prev) => {
+      if (!prev[monthKey] && monthKey !== currentMonthKey) return prev;
+      const base = prev[monthKey] || records;
+      const updated = updateDayRecords(base);
+      return { ...prev, [monthKey]: updated };
+    });
+  };
+
+  const removeRecordsById = (itemId) => {
+    const removeFrom = (recordList) =>
+      recordList.map((day) => ({
+        ...day,
+        orderedItems: (day.orderedItems || []).filter((item) => item.id !== itemId)
+      }));
+
+    setRecords((prev) => removeFrom(prev));
+    setDataCache((prev) => {
+      const next = {};
+      Object.entries(prev).forEach(([key, value]) => {
+        next[key] = removeFrom(value);
+      });
+      return next;
+    });
+  };
+
+  const applyOutboxOverlay = (recordList, queue, monthKey) => {
+    let next = recordList.map((day) => ({
+      ...day,
+      orderedItems: [...(day.orderedItems || [])]
+    }));
+
+    const upsert = (draft) => {
+      const itemDate = getItemDate(draft);
+      if (!itemDate) return;
+      const itemMonthKey = `${itemDate.split('-')[0]}-${itemDate.split('-')[1]}`;
+      if (monthKey && itemMonthKey !== monthKey) return;
+      let found = false;
+      next = next.map((day) => {
+        const filtered = (day.orderedItems || []).filter((item) => item.id !== draft.id);
+        if (day.date === itemDate) {
+          found = true;
+          return { ...day, orderedItems: [...filtered, draft] };
+        }
+        return { ...day, orderedItems: filtered };
+      });
+      if (!found) {
+        next.push({ date: itemDate, orderedItems: [draft] });
+      }
+    };
+
+    const remove = (itemId) => {
+      next = next.map((day) => ({
+        ...day,
+        orderedItems: (day.orderedItems || []).filter((item) => item.id !== itemId)
+      }));
+    };
+
+    queue.forEach((entry) => {
+      if (entry.type === 'delete') {
+        const targetDate = entry.params?.startDate || entry.params?.date;
+        if (targetDate) {
+          const entryMonthKey = `${targetDate.split('-')[0]}-${targetDate.split('-')[1]}`;
+          if (monthKey && entryMonthKey !== monthKey) return;
+        }
+        remove(entry.params?.itemId);
+      } else if (entry.type === 'create') {
+        upsert(entry.draft);
+      }
+    });
+
+    return next;
+  };
+
+  const enqueueCreate = (draft) => {
+    const entry = {
+      queueId: createQueueId(),
+      type: 'create',
+      draft,
+      createdAt: new Date().toISOString(),
+      attemptCount: 0
+    };
+    const next = enqueueOutboxEntry(entry);
+    setOutbox(next);
+    return entry;
+  };
+
+  const enqueueDelete = (params) => {
+    const entry = {
+      queueId: createQueueId(),
+      type: 'delete',
+      params,
+      createdAt: new Date().toISOString(),
+      attemptCount: 0
+    };
+    const next = enqueueOutboxEntry(entry);
+    setOutbox(next);
+    return entry;
+  };
+
+  const flushOutbox = async () => {
+    if (!isOnline || syncInProgressRef.current) return;
+    if (!pin) return;
+    const queue = getOutbox();
+    if (!queue.length) return;
+
+    syncInProgressRef.current = true;
+    setSyncState('syncing');
+
+    let hadError = false;
+    for (const entry of queue) {
+      try {
+        if (entry.type === 'create') {
+          const payload = await buildPayloadFromDraft(entry.draft);
+          await createItem(payload);
+        } else if (entry.type === 'delete') {
+          await deleteItem(entry.params);
+        }
+        const next = removeOutboxEntry(entry.queueId);
+        setOutbox(next);
+      } catch (error) {
+        hadError = true;
+        const next = updateOutboxEntry(entry.queueId, {
+          attemptCount: (entry.attemptCount || 0) + 1,
+          lastAttemptAt: new Date().toISOString(),
+          lastError: String(error)
+        });
+        setOutbox(next);
+      }
+    }
+
+    syncInProgressRef.current = false;
+    setSyncState(hadError ? 'error' : 'idle');
+    if (!hadError) {
+      loadData(true);
+    }
+  };
+
+  const buildDeleteParams = (item) => {
+    const startDate = item.startTime ? item.startTime.split('T')[0] : getItemDate(item);
+    const endDate = item.endTime ? item.endTime.split('T')[0] : undefined;
+    return {
+      itemId: item.id,
+      date: item.date || startDate,
+      startDate,
+      endDate
+    };
+  };
+
+  const handleDeleteItem = async (item) => {
+    if (!item?.id) return;
+    const params = buildDeleteParams(item);
+    removeRecordsById(item.id);
+    if (!isOnline) {
+      enqueueDelete(params);
+      return;
+    }
+    try {
+      await deleteItem(params);
+      loadData(true);
+    } catch (error) {
+      console.error(error);
+      enqueueDelete(params);
+      setSyncState('error');
+    }
+  };
+
+  const handleSaveItem = async () => {
+    if (!ensurePin()) return;
+    const draft = buildDraftFromForm(editingItem?.id);
+    updateRecordsWithItem(draft);
+    let queued = false;
+    if (!isOnline) {
+      enqueueCreate(draft);
+      queued = true;
+    } else {
+      try {
+        const payload = await buildPayloadFromDraft(draft);
+        await createItem(payload);
+      } catch (error) {
+        console.error(error);
+        enqueueCreate(draft);
+        queued = true;
+        setSyncState('error');
+      }
+    }
+
+    if (!queued) {
+      loadData(true);
+    }
+    closeModal();
+    resetFormData();
+  };
+
+  const getSyncMessage = () => {
+    if (!isOnline) {
+      return outbox.length > 0
+        ? `オフラインです。未同期の操作が${outbox.length}件あります。`
+        : 'オフラインです。オンラインになると同期します。';
+    }
+    if (syncState === 'syncing') {
+      return outbox.length > 0
+        ? `同期中...（残り${outbox.length}件）`
+        : '同期中...';
+    }
+    if (syncState === 'error') {
+      return outbox.length > 0
+        ? `同期に失敗しました。未同期の操作が${outbox.length}件あります。`
+        : '同期に失敗しました。';
+    }
+    if (outbox.length > 0) {
+      return `未同期の操作が${outbox.length}件あります。`;
+    }
+    return '';
+  };
+
+  const resetFormData = () => {
+    const now = new Date();
+    const dateStr = now.toISOString().split('T')[0];
+    const timeStr = now.toTimeString().slice(0, 5);
+    setFormData({
+      date: dateStr,
+      startTime: timeStr,
+      endTime: '',
+      title: '',
+      content: '',
+      quickPost: false
+    });
+  };
+
+  const openCreateModal = () => {
+    setEditingItem(null);
+    resetFormData();
+    setIsModalOpen(true);
+  };
+
+  const goToToday = () => {
+    const today = new Date();
+    setCurrentYear(today.getFullYear());
+    setCurrentMonth(today.getMonth() + 1);
+  };
+
+  const openEditModal = (item) => {
+    if (!item) return;
+    setEditingItem(item);
+    const isEvent = isEventItem(item);
+    let date = item.date;
+    let startTime = '';
+    let endTime = '';
+    let content = item.content || '';
+
+    if (isEvent && item.startTime) {
+      date = item.startTime.split('T')[0];
+      startTime = item.startTime.split('T')[1]?.slice(0, 5) || '';
+      if (item.endTime) {
+        endTime = item.endTime.split('T')[1]?.slice(0, 5) || '';
+      }
+      content = ensureTag(content, '#予定');
+    } else if (item.published) {
+      date = item.published.split('T')[0];
+    }
+
+    setFormData({
+      date,
+      startTime,
+      endTime,
+      title: item.name || '',
+      content
+    });
+    setIsModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setIsModalOpen(false);
+    setEditingItem(null);
+  };
+
+  const closeDayModal = () => {
+    setIsDayModalOpen(false);
+    setSelectedDate(null);
+  };
+
+  const openDayModal = (dateStr) => {
+    setSelectedDate(dateStr);
+    setIsDayModalOpen(true);
+  };
+
+  const extractHashtags = (text) => {
+    const regex = /#[\w\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF\uFF66-\uFF9F]+/g;
+    const matches = text.match(regex);
+    return matches ? matches.map(tag => ({ type: 'Hashtag', name: tag })) : [];
+  };
+
+  const getHashtagQueryAtCursor = (text, cursorPos) => {
+    const uptoCursor = text.slice(0, cursorPos);
+    const hashIndex = uptoCursor.lastIndexOf('#');
+    if (hashIndex === -1) return null;
+    const beforeHash = hashIndex === 0 ? '' : uptoCursor[hashIndex - 1];
+    if (beforeHash && !/\s/.test(beforeHash)) return null;
+    const fragment = uptoCursor.slice(hashIndex + 1);
+    if (/\s/.test(fragment)) return null;
+    return fragment;
+  };
+
+  const insertHashtag = (tag) => {
+    const textarea = contentTextareaRef.current;
+    if (!textarea) return;
+    const value = formData.content || '';
+    const cursorPos = textarea.selectionStart || 0;
+    const query = getHashtagQueryAtCursor(value, cursorPos);
+    let newValue = value;
+    let nextCursorPos = cursorPos;
+
+    if (query !== null) {
+      const uptoCursor = value.slice(0, cursorPos);
+      const hashIndex = uptoCursor.lastIndexOf('#');
+      const before = value.slice(0, hashIndex);
+      const after = value.slice(cursorPos);
+      newValue = `${before}${tag}${after}`;
+      nextCursorPos = before.length + tag.length;
+    } else {
+      const before = value.slice(0, cursorPos);
+      const after = value.slice(cursorPos);
+      const inHashtag = /#[^\s#]+$/.test(before);
+      const prefix = inHashtag ? ' ' : (before && !before.endsWith('\n') ? '\n' : '');
+      newValue = `${before}${prefix}${tag}${after}`;
+      nextCursorPos = before.length + prefix.length + tag.length;
+    }
+
+    setFormData({ ...formData, content: newValue });
+    setHashtagQuery('');
+    setShowTagSuggestions(false);
+    setTimeout(() => {
+      textarea.focus();
+      textarea.setSelectionRange(nextCursorPos, nextCursorPos);
+    }, 0);
+  };
+
+  const formTags = useMemo(() => extractHashtags(formData.content), [formData.content]);
+  const formIsEvent = useMemo(() => hasTag(formTags, '#予定'), [formTags]);
+
+  const suggestedTags = useMemo(() => {
+    const baseTags = availableTags.filter(tag => tag !== '#日記' && tag !== '#予定');
+    if (!showTagSuggestions) return [];
+    if (!hashtagQuery) return baseTags;
+    const query = hashtagQuery.toLowerCase();
+    return baseTags.filter(tag => tag.toLowerCase().includes(query));
+  }, [availableTags, hashtagQuery, showTagSuggestions]);
+
+  const renderContentWithTags = (content) => {
+    if (!content) return null;
+    const parts = content.split(/(#[\w\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF\uFF66-\uFF9F]+)/g);
+    return parts.map((part, i) => {
+      if (part.startsWith('#')) {
+        return (
+          <span key={i} className="hashtag" onClick={(e) => {
+            e.stopPropagation();
+            setFilterTag(part === filterTag ? null : part);
+          }}>
+            {part}
+          </span>
+        );
+      }
+      return part;
+    });
+  };
+
+  return (
+    <>
+      <div className="app-container">
+            <header className="header">
+            <h1>Daily Life</h1>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button onClick={() => setIsStatsOpen(true)} className="logout-btn" title="統計">
+                📊
+              </button>
+              <button onClick={() => setIsSettingsOpen(true)} className="logout-btn" title="設定">
+                <Settings size={18} />
+              </button>
+              <button onClick={resetPin} className="logout-btn" title="パスワード再入力">
+                <KeyRound size={18} />
+              </button>
+              <button onClick={() => { resetPin(); signOut(); }} className="logout-btn" title="ログアウト">
+                <LogOut size={20} />
+              </button>
+            </div>
+          </header>
+
+          <div style={{
+            display: 'flex', 
+            justifyContent: 'center', 
+            alignItems: 'center', 
+            padding: '16px 20px 0', 
+            gap: '20px',
+            background: 'white'
+          }}>
+            <button onClick={prevMonth} className="logout-btn"><ChevronLeft/></button>
+            <h2 style={{margin:0, fontSize:'1.2rem', color:'#37474F'}}>
+              {currentYear}年 {currentMonth}月
+            </h2>
+            <button onClick={nextMonth} className="logout-btn"><ChevronRight/></button>
+            <button 
+              onClick={goToToday} 
+              className="logout-btn" 
+              title="今日へ移動"
+              style={{
+                marginLeft: 'auto',
+                padding: '6px 12px',
+                fontSize: '0.85rem',
+                background: '#FF6B6B',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                transition: 'background 0.2s'
+              }}
+            >
+              今日
+            </button>
+          </div>
+
+          <div className="view-switch">
+            <button className={`view-btn ${viewMode === 'timeline' ? 'active' : ''}`} onClick={() => setViewMode('timeline')}>
+              <List size={16}/> タイムライン
+            </button>
+            <button className={`view-btn ${viewMode === 'week' ? 'active' : ''}`} onClick={() => setViewMode('week')}>
+              <CalendarDays size={16}/> 週間
+            </button>
+            <button className={`view-btn ${viewMode === 'calendar' ? 'active' : ''}`} onClick={() => setViewMode('calendar')}>
+              <Calendar size={16}/> カレンダー
+            </button>
+          </div>
+
+          {viewMode === 'timeline' && (
+            <>
+              <div className="filter-bar">
+                <div className="filter-group">
+                  <button 
+                    className={`filter-btn ${dateRangeFilter === 'all' ? 'active' : ''}`}
+                    onClick={() => setDateRangeFilter('all')}
+                  >
+                    全て
+                  </button>
+                  <button 
+                    className={`filter-btn ${dateRangeFilter === 'today' ? 'active' : ''}`}
+                    onClick={() => setDateRangeFilter('today')}
+                  >
+                    今日
+                  </button>
+                  <button 
+                    className={`filter-btn ${dateRangeFilter === 'week' ? 'active' : ''}`}
+                    onClick={() => setDateRangeFilter('week')}
+                  >
+                    今週
+                  </button>
+                  <button 
+                    className={`filter-btn ${dateRangeFilter === 'month' ? 'active' : ''}`}
+                    onClick={() => setDateRangeFilter('month')}
+                  >
+                    今月
+                  </button>
+                </div>
+              </div>
+
+              <div className="type-tab-bar">
+                <button 
+                  className={`type-tab ${typeFilter === 'all' ? 'active' : ''}`}
+                  onClick={() => setTypeFilter('all')}
+                >
+                  全て
+                </button>
+                <button 
+                  className={`type-tab ${typeFilter === 'note' ? 'active' : ''}`}
+                  onClick={() => setTypeFilter('note')}
+                >
+                  📝 日記
+                </button>
+                <button 
+                  className={`type-tab ${typeFilter === 'event' ? 'active' : ''}`}
+                  onClick={() => setTypeFilter('event')}
+                >
+                  📌 予定
+                </button>
+              </div>
+
+              <div className="search-bar">
+                <input 
+                  type="text" 
+                  placeholder="タイトル・内容で検索..." 
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="search-input"
+                />
+              </div>
+
+              {availableTags.length > 0 && (
+                <div className="tag-filter-bar">
+                  {availableTags.map(tag => (
+                    <button 
+                      key={tag} 
+                      className={`tag-chip ${filterTag === tag ? 'active' : ''}`}
+                      onClick={() => setFilterTag(filterTag === tag ? null : tag)}
+                    >
+                      {tag}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {viewMode === 'calendar' && availableTags.length > 0 && (
+            <div className="tag-filter-bar">
+              {availableTags.map(tag => (
+                <button 
+                  key={tag} 
+                  className={`tag-chip ${filterTag === tag ? 'active' : ''}`}
+                  onClick={() => setFilterTag(filterTag === tag ? null : tag)}
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <main className="main-content">
+            {loading ? (
+              <p className="loading">読み込み中...</p>
+            ) : filteredItems.length === 0 ? (
+              <div className="empty-state">
+                <FileText size={48} color="#e0e0e0" style={{marginBottom: 20}} />
+                <p>表示するアイテムがありません。<br/>新しい投稿を作成しましょう！</p>
+              </div>
+            ) : (
+              <>
+                {getSyncMessage() && (
+                  <div className={`alert ${!isOnline ? 'warn' : syncState === 'error' ? 'error' : 'info'}`}>
+                    <AlertCircle size={18}/>
+                    <span>{getSyncMessage()}</span>
+                    {isOnline && outbox.length > 0 && (
+                      <button
+                        className="link-btn info"
+                        onClick={flushOutbox}
+                        disabled={syncState === 'syncing'}
+                      >
+                        同期する
+                      </button>
+                    )}
+                  </div>
+                )}
+                {cryptoError && (
+                  <div className="alert error">
+                    <AlertCircle size={18}/>
+                    <span>{cryptoError}</span>
+                    <button className="link-btn" onClick={resetPin}>パスワードを再入力</button>
+                  </div>
+                )}
+
+                {viewMode === 'timeline' ? (
+                  <div className="timeline-list">
+                    {filteredItems.map((item) => (
+                      <div key={item.id} className={`card ${isEventItem(item) ? 'schedule' : 'diary'}`}>
+                        <div className="card-header">
+                          <div className="card-header-meta">
+                            <span className="date-badge">
+                              {isEventItem(item) ? <Clock size={12} style={{marginRight:4}}/> : <FileText size={12} style={{marginRight:4}}/>}
+                              {isEventItem(item)
+                                ? `${item.startTime?.split('T')[0]} ${item.startTime?.split('T')[1]?.slice(0,5) || ''}` 
+                                : item.published?.split('T')[0]}
+                            </span>
+                            <span className="user-id-badge">ID: {userIdLabel}</span>
+                          </div>
+                          <div className="card-actions">
+                            <button className="icon-btn" onClick={() => openEditModal(item)} title="編集">
+                              <Pencil size={16} />
+                            </button>
+                            <button className="delete-btn" onClick={() => {
+                              if (!confirm('削除しますか？')) return;
+                              handleDeleteItem(item);
+                            }}>
+                              <Trash2 size={18} />
+                            </button>
+                          </div>
+                        </div>
+                        {item.name && <h3>{item.name}</h3>}
+                        <p className="content">{renderContentWithTags(item.content)}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : viewMode === 'week' ? (
+                  <div className="week-view-panel">
+                    <div className="week-nav">
+                      <button onClick={() => setWeekViewStartDate(new Date(weekViewStartDate.getTime() - 7 * 24 * 60 * 60 * 1000))} className="week-nav-btn">
+                        <ChevronLeft size={18} />
+                      </button>
+                      <span className="week-label">
+                        {weekViewDays[0].date} - {weekViewDays[6].date}
+                      </span>
+                      <button onClick={() => setWeekViewStartDate(new Date(weekViewStartDate.getTime() + 7 * 24 * 60 * 60 * 1000))} className="week-nav-btn">
+                        <ChevronRight size={18} />
+                      </button>
+                    </div>
+                    <div className="week-grid">
+                      {weekViewDays.map(day => (
+                        <div key={day.date} className={`week-day ${day.isToday ? 'today' : ''}`}>
+                          <div className="week-day-header">
+                            <div className="week-day-name">{day.dayOfWeek}</div>
+                            <div className="week-day-num">{day.day}</div>
+                          </div>
+                          <div className="week-day-items">
+                            {day.items.map(item => (
+                              <div 
+                                key={item.id} 
+                                className={`week-item ${isEventItem(item) ? 'event' : 'note'}`}
+                                title={item.name}
+                              >
+                                {isEventItem(item) && item.startTime && (
+                                  <div className="week-item-time">{item.startTime.split('T')[1]?.slice(0, 5)}</div>
+                                )}
+                                <div className="week-item-title">{item.name || '（無題）'}</div>
+                              </div>
+                            ))}
+                          </div>
+                          <button 
+                            className="week-day-add-btn"
+                            onClick={() => {
+                              setFormData(prev => ({...prev, date: day.date}));
+                              setIsModalOpen(true);
+                            }}
+                            title="この日に投稿を追加"
+                          >
+                            <Plus size={16} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="calendar-panel">
+                    <div className="calendar-header-row">
+                      {['日', '月', '火', '水', '木', '金', '土'].map(d => (
+                        <div key={d} className="calendar-weekday">{d}</div>
+                      ))}
+                    </div>
+                    <div className="calendar-grid">
+                      {calendarDays.map((day, i) => (
+                        <button
+                          key={i} 
+                          type="button"
+                          className={`calendar-cell ${day.isCurrentMonth ? '' : 'other-month'} ${day.date === new Date().toISOString().split('T')[0] ? 'today' : ''}`}
+                          onClick={() => day.isCurrentMonth ? openDayModal(day.date) : null}
+                          disabled={!day.isCurrentMonth}
+                          aria-label={`${day.date} ${day.isCurrentMonth ? '' : '(他の月)'} ${day.items?.length ? `${day.items.length}件` : ''}`.trim()}
+                        >
+                          <span className="day-number">{day.day}</span>
+                          <div className="day-items">
+                            {day.items?.map(item => (
+                              <div key={item.id} className={`day-item-dot ${isEventItem(item) ? 'event' : 'note'}`} title={item.name} />
+                            ))}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </main>
+
+          {isModalOpen && (
+            <div className="modal-overlay" onClick={closeModal}>
+              <div className="modal" onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                  <h2>{editingItem ? '編集' : '新規投稿'}</h2>
+                  <button className="close-btn" onClick={closeModal}>
+                    <X size={20}/>
+                  </button>
+                </div>
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  handleSaveItem();
+                }}>
+                  <div className="form-group">
+                    <label>日付</label>
+                    <input type="date" className="input-field" 
+                      value={formData.date} 
+                      onChange={e => setFormData({...formData, date: e.target.value})} required />
+                  </div>
+
+                  {formIsEvent && (
+                    <div className="form-group" style={{display:'flex', gap:10}}>
+                      <div style={{flex:1}}>
+                        <label>開始時間</label>
+                        <input type="time" className="input-field" 
+                          value={formData.startTime} 
+                          onChange={e => setFormData({...formData, startTime: e.target.value})} required />
+                      </div>
+                      <div style={{flex:1}}>
+                        <label>終了時間</label>
+                        <input type="time" className="input-field" 
+                          value={formData.endTime} 
+                          onChange={e => setFormData({...formData, endTime: e.target.value})} />
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="form-group">
+                    <label>タイトル (任意)</label>
+                    <input type="text" className="input-field" placeholder="タイトル" 
+                      value={formData.title} 
+                      onChange={e => setFormData({...formData, title: e.target.value})} />
+                  </div>
+
+                  <div className="form-group">
+                    <label>内容 (ハッシュタグ #日記 / #予定 で種類を決めます)</label>
+                    <textarea
+                      ref={contentTextareaRef}
+                      className="input-field"
+                      rows="6"
+                      placeholder="今なにしてる？ #日記"
+                      value={formData.content}
+                      onChange={e => {
+                        const nextValue = e.target.value;
+                        const cursorPos = e.target.selectionStart || 0;
+                        const query = getHashtagQueryAtCursor(nextValue, cursorPos);
+                        setFormData({...formData, content: nextValue});
+                        if (query !== null) {
+                          setHashtagQuery(query);
+                          setShowTagSuggestions(true);
+                        } else {
+                          setHashtagQuery('');
+                          setShowTagSuggestions(false);
+                        }
+                      }}
+                      onBlur={() => setTimeout(() => setShowTagSuggestions(false), 150)}
+                      onFocus={(e) => {
+                        const cursorPos = e.target.selectionStart || 0;
+                        const query = getHashtagQueryAtCursor(e.target.value, cursorPos);
+                        if (query !== null) {
+                          setHashtagQuery(query);
+                          setShowTagSuggestions(true);
+                        }
+                      }}
+                      required
+                    ></textarea>
+                    <div style={{display: 'flex', gap: '8px', marginTop: '8px'}}>
+                      <button 
+                        type="button" 
+                        className="tag-insert-btn"
+                        onClick={() => insertHashtag('#日記')}
+                      >
+                        <Hash size={14} style={{marginRight: 4}} />
+                        日記
+                      </button>
+                      <button 
+                        type="button" 
+                        className="tag-insert-btn"
+                        onClick={() => insertHashtag('#予定')}
+                      >
+                        <Hash size={14} style={{marginRight: 4}} />
+                        予定
+                      </button>
+                    </div>
+                    {showTagSuggestions && suggestedTags.length > 0 && (
+                      <div className="tag-suggestions">
+                        {suggestedTags.map(tag => (
+                          <button
+                            key={tag}
+                            type="button"
+                            className="tag-suggestion"
+                            onClick={() => insertHashtag(tag)}
+                          >
+                            {tag}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {!formIsEvent && (
+                    <div className="form-group">
+                      <label className="checkbox-label">
+                        <input type="checkbox" 
+                          checked={formData.quickPost} 
+                          onChange={e => setFormData({...formData, quickPost: e.target.checked})} />
+                        短い投稿は確認なしで投稿（{formData.content.length} 字）
+                      </label>
+                      <p style={{fontSize: '0.85rem', color: 'var(--text-secondary)', margin: '4px 0 0'}}>
+                        50字以下の場合、確認画面なしで投稿できます
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="form-group template-buttons">
+                    {templates.length > 0 && (
+                      <button 
+                        type="button"
+                        className="template-btn"
+                        onClick={() => setIsTemplatePanelOpen(!isTemplatePanelOpen)}
+                      >
+                        📋 テンプレート ({templates.length})
+                      </button>
+                    )}
+                    <button 
+                      type="button"
+                      className="template-btn"
+                      onClick={() => {
+                        const name = prompt('テンプレート名を入力してください:');
+                        if (name) {
+                          saveTemplate({
+                            name,
+                            isEvent: formIsEvent,
+                            title: formData.title,
+                            content: formData.content,
+                            startTime: formData.startTime,
+                            endTime: formData.endTime
+                          });
+                          setTemplates(getTemplates());
+                          alert('テンプレートを保存しました！');
+                        }
+                      }}
+                    >
+                      ⭐ 現在の内容を保存
+                    </button>
+                  </div>
+
+                  <button type="submit" className="submit-btn">投稿する</button>
+                </form>
+
+                {isTemplatePanelOpen && templates.length > 0 && (
+                  <div className="template-panel">
+                    <h4>テンプレート一覧</h4>
+                    <div className="template-list">
+                      {templates.map(template => (
+                        <button
+                          key={template.id}
+                          type="button"
+                          className="template-item"
+                          onClick={() => {
+                            const templateIsEvent = template.isEvent || hasTag(extractHashtags(template.content || ''), '#予定');
+                            const nextContent = templateIsEvent ? ensureTag(template.content, '#予定') : template.content;
+                            setFormData({
+                              date: formData.date,
+                              startTime: template.startTime || formData.startTime,
+                              endTime: template.endTime || '',
+                              title: template.title,
+                              content: nextContent,
+                              quickPost: formData.quickPost
+                            });
+                            setIsTemplatePanelOpen(false);
+                          }}
+                        >
+                          <div className="template-item-content">
+                            <div className="template-name">{template.name}</div>
+                            <div className="template-type">
+                              {(template.isEvent || hasTag(extractHashtags(template.content || ''), '#予定')) ? '📌 予定' : '📝 日記'}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="template-delete-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (confirm('テンプレートを削除しますか？')) {
+                                deleteTemplate(template.id);
+                                setTemplates(getTemplates());
+                              }
+                            }}
+                          >
+                            ✕
+                          </button>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {isDayModalOpen && selectedDate && (
+            <div className="modal-overlay" onClick={closeDayModal}>
+              <div className="modal day-modal day-detail-view" onClick={e => e.stopPropagation()}>
+                <div className="modal-header day-detail-header">
+                  <div>
+                    <h2>{selectedDate}</h2>
+                    <p className="day-detail-subtitle">
+                      {new Date(selectedDate + 'T00:00:00').toLocaleDateString('ja-JP', {weekday: 'long', month: 'long', day: 'numeric'})}
+                    </p>
+                  </div>
+                  <button className="close-btn" onClick={closeDayModal}>
+                    <X size={20}/>
+                  </button>
+                </div>
+                
+                <div className="day-items-list">
+                  {records.find(r => r.date === selectedDate)?.orderedItems?.length > 0 ? (
+                    <>
+                      <div className="day-stats">
+                        <span className="stat">
+                          📝 日記: {records.find(r => r.date === selectedDate)?.orderedItems?.filter(i => !isEventItem(i)).length}
+                        </span>
+                        <span className="stat">
+                          📌 予定: {records.find(r => r.date === selectedDate)?.orderedItems?.filter(i => isEventItem(i)).length}
+                        </span>
+                      </div>
+
+                      {/* 予定（時系列） */}
+                      {records.find(r => r.date === selectedDate)?.orderedItems?.filter(i => isEventItem(i)).length > 0 && (
+                        <div className="day-section">
+                          <h3 className="day-section-title">📌 予定</h3>
+                          {records.find(r => r.date === selectedDate)?.orderedItems?.filter(i => isEventItem(i)).sort((a, b) => {
+                            const timeA = a.startTime || '';
+                            const timeB = b.startTime || '';
+                            return timeA.localeCompare(timeB);
+                          }).map(item => (
+                            <div key={item.id} className="day-item event">
+                              <div className="item-header">
+                                <div className="item-info">
+                                  {isEventItem(item) && item.startTime && (
+                                    <p className="item-time">
+                                      <Clock size={14} style={{marginRight: 6}} />
+                                      <strong>{item.startTime?.split('T')[1]?.slice(0, 5)}</strong>
+                                      {item.endTime && <span> - {item.endTime?.split('T')[1]?.slice(0, 5)}</span>}
+                                    </p>
+                                  )}
+                                  <span className="user-id-badge compact">ID: {userIdLabel}</span>
+                                  {item.name && <h4 className="item-title">{item.name}</h4>}
+                                </div>
+                                <div style={{display: 'flex', gap: '8px', flexShrink: 0}}>
+                                  <button className="icon-btn" onClick={() => {
+                                    openEditModal(item);
+                                    closeDayModal();
+                                  }} title="編集">
+                                    <Pencil size={16} />
+                                  </button>
+                                  <button className="icon-btn delete" onClick={() => {
+                                    if (!confirm('削除しますか？')) return;
+                                    handleDeleteItem(item);
+                                    closeDayModal();
+                                  }} title="削除">
+                                    <Trash2 size={16} />
+                                  </button>
+                                </div>
+                              </div>
+                              {item.content && <p className="item-content">{renderContentWithTags(item.content)}</p>}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* 日記 */}
+                      {records.find(r => r.date === selectedDate)?.orderedItems?.filter(i => !isEventItem(i)).length > 0 && (
+                        <div className="day-section">
+                          <h3 className="day-section-title">📝 日記</h3>
+                          {records.find(r => r.date === selectedDate)?.orderedItems?.filter(i => !isEventItem(i)).map(item => (
+                            <div key={item.id} className="day-item note">
+                              <div className="item-header">
+                                <div className="item-info">
+                                  <span className="user-id-badge compact">ID: {userIdLabel}</span>
+                                  {item.name && <h4 className="item-title">{item.name}</h4>}
+                                </div>
+                                <div style={{display: 'flex', gap: '8px', flexShrink: 0}}>
+                                  <button className="icon-btn" onClick={() => {
+                                    openEditModal(item);
+                                    closeDayModal();
+                                  }} title="編集">
+                                    <Pencil size={16} />
+                                  </button>
+                                  <button className="icon-btn delete" onClick={() => {
+                                    if (!confirm('削除しますか？')) return;
+                                    handleDeleteItem(item);
+                                    closeDayModal();
+                                  }} title="削除">
+                                    <Trash2 size={16} />
+                                  </button>
+                                </div>
+                              </div>
+                              {item.content && <p className="item-content">{renderContentWithTags(item.content)}</p>}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="empty-day">
+                      <FileText size={48} color="#e0e0e0" style={{marginBottom: 12}} />
+                      <p>この日の投稿はまだありません</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="day-modal-actions">
+                  <button className="submit-btn" onClick={() => {
+                    setFormData(prev => ({...prev, date: selectedDate}));
+                    setIsModalOpen(true);
+                    closeDayModal();
+                  }}>
+                    <Plus size={16} style={{marginRight: 8}} />
+                    この日に新規投稿
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {isSettingsOpen && (
+            <div className="modal-overlay" onClick={() => setIsSettingsOpen(false)}>
+              <div className="modal settings-modal" onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                  <h2>設定</h2>
+                  <button className="close-btn" onClick={() => setIsSettingsOpen(false)}>
+                    <X size={20}/>
+                  </button>
+                </div>
+                <div className="settings-section">
+                  <h3>ログインユーザー</h3>
+                  <p className="settings-value">{user?.userId || user?.username || 'unknown'}</p>
+                </div>
+                <div className="settings-section">
+                  <h3>通知</h3>
+                  {!notificationSupported && (
+                    <p className="settings-note">このブラウザでは通知機能が利用できません。</p>
+                  )}
+                  {notificationSupported && (
+                    <>
+                      <div className="settings-row">
+                        <span className="settings-label">通知を有効化</span>
+                        <label className="settings-switch">
+                          <input
+                            type="checkbox"
+                            checked={notificationSettings.enabled}
+                            onChange={async (e) => {
+                              const nextEnabled = e.target.checked;
+                              setNotificationError('');
+                              if (nextEnabled) {
+                                const result = await requestNotificationPermission();
+                                if (result !== 'granted') {
+                                  updateNotificationSettings({ enabled: false });
+                                  setNotificationError('通知の許可が必要です。');
+                                  return;
+                                }
+                              }
+                              updateNotificationSettings({ enabled: nextEnabled });
+                            }}
+                          />
+                          <span className="settings-slider"></span>
+                        </label>
+                      </div>
+                      <div className="settings-row">
+                        <span className="settings-label">権限</span>
+                        <div className="settings-inline">
+                          <span className={`settings-pill ${notificationPermission}`}>
+                            {notificationPermissionLabel}
+                          </span>
+                          <button
+                            type="button"
+                            className="settings-btn"
+                            onClick={async () => {
+                              setNotificationError('');
+                              const result = await requestNotificationPermission();
+                              if (result !== 'granted') {
+                                setNotificationError('通知の許可が必要です。');
+                              }
+                            }}
+                            disabled={notificationPermission === 'granted'}
+                          >
+                            許可を取得
+                          </button>
+                        </div>
+                      </div>
+                      <div className="settings-row">
+                        <span className="settings-label">日記通知時刻</span>
+                        <input
+                          type="time"
+                          className="settings-input"
+                          value={notificationSettings.diaryTime}
+                          onChange={(e) => updateNotificationSettings({ diaryTime: e.target.value })}
+                        />
+                      </div>
+                      <div className="settings-row">
+                        <span className="settings-label">予定通知</span>
+                        <div className="settings-inline">
+                          <input
+                            type="number"
+                            min={5}
+                            max={240}
+                            step={5}
+                            className="settings-input settings-number"
+                            value={notificationSettings.eventLeadMinutes}
+                            onChange={(e) => updateNotificationSettings({ eventLeadMinutes: Number(e.target.value) })}
+                          />
+                          <span className="settings-unit">分前（デフォルト30分）</span>
+                        </div>
+                      </div>
+                      {notificationError && (
+                        <p className="settings-error">{notificationError}</p>
+                      )}
+                      <p className="settings-note">通知設定はこの端末にのみ保存されます。</p>
+                    </>
+                  )}
+                </div>
+                <div className="settings-section">
+                  <h3>サポート</h3>
+                  <p style={{color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '12px'}}>
+                    このアプリが気に入ったら、ぜひサポートをお願いします！
+                  </p>
+                  <a 
+                    href="https://ko-fi.com/t1048" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="kofi-btn"
+                  >
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" style={{marginRight: 8}}>
+                      <path d="M23.881 8.948c-.773-4.085-4.859-4.593-4.859-4.593H.723c-.604 0-.679.798-.679.798s-.082 7.324-.022 11.822c.164 2.424 2.586 2.672 2.586 2.672s8.267-.023 11.966-.049c2.438-.426 2.683-2.566 2.658-3.734 4.352.24 7.422-2.831 6.649-6.916zm-11.062 3.511c-1.246 1.453-4.011 3.976-4.011 3.976s-.121.119-.31.023c-.076-.057-.108-.09-.108-.09-.443-.441-3.368-3.049-4.034-3.954-.709-.965-1.041-2.7-.091-3.71.951-1.01 3.005-1.086 4.363.407 0 0 1.565-1.782 3.468-.963 1.904.82 1.832 3.011.723 4.311zm6.173.478c-.928.116-1.682.028-1.682.028V7.284h1.77s1.971.551 1.971 2.638c0 1.913-.985 2.667-2.059 3.015z"/>
+                    </svg>
+                    Ko-fiでサポート
+                  </a>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {isStatsOpen && (
+            <div className="modal-overlay" onClick={() => setIsStatsOpen(false)}>
+              <div className="modal stats-modal" onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                  <h2>📊 {statistics.monthStr} の統計</h2>
+                  <button className="close-btn" onClick={() => setIsStatsOpen(false)}>
+                    <X size={20}/>
+                  </button>
+                </div>
+                
+                <div className="stats-content">
+                  <div className="stats-grid">
+                    <div className="stat-card">
+                      <div className="stat-label">📝 日記</div>
+                      <div className="stat-value">{statistics.notes}</div>
+                      <div className="stat-unit">件</div>
+                    </div>
+                    <div className="stat-card">
+                      <div className="stat-label">📌 予定</div>
+                      <div className="stat-value">{statistics.events}</div>
+                      <div className="stat-unit">件</div>
+                    </div>
+                    <div className="stat-card">
+                      <div className="stat-label">🔥 連続投稿</div>
+                      <div className="stat-value">{statistics.consecutiveDays}</div>
+                      <div className="stat-unit">日</div>
+                    </div>
+                    <div className="stat-card">
+                      <div className="stat-label">📏 平均文字数</div>
+                      <div className="stat-value">{statistics.avgChars}</div>
+                      <div className="stat-unit">字</div>
+                    </div>
+                  </div>
+
+                  {statistics.topTags.length > 0 && (
+                    <div className="stats-section">
+                      <h3>よく使われたタグ</h3>
+                      <div className="tags-list">
+                        {statistics.topTags.map(tag => (
+                          <div key={tag} className="tag-item">{tag}</div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="stats-section">
+                    <h3>アクティビティ</h3>
+                    <p className="stats-text">
+                      今月は{statistics.notes + statistics.events}件の投稿をしています。
+                      {statistics.consecutiveDays > 0 && (
+                        <>今{statistics.consecutiveDays}日間連続で投稿中です！</>
+                      )}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {consentStatus !== 'agreed' && (
+            <div className="modal-overlay" onClick={() => {}}>
+              <div className="modal consent-modal">
+                <div className="modal-header">
+                  <h2>利用同意</h2>
+                </div>
+                <div className="consent-body">
+                  <p className="consent-lead">
+                    {consentStatus === 'loading'
+                      ? '同意情報を確認しています...'
+                      : '本アプリを利用するため、以下の内容に同意してください。'}
+                  </p>
+                  <ul className="consent-list">
+                    {CONSENT_ITEMS.map((item, index) => (
+                      <li key={`${index}-${item}`}>{item}</li>
+                    ))}
+                  </ul>
+                  <p className="consent-note">同意バージョン: {CONSENT_VERSION}</p>
+                </div>
+                <label className="consent-check">
+                  <input
+                    type="checkbox"
+                    checked={consentChecked}
+                    onChange={(e) => setConsentChecked(e.target.checked)}
+                    disabled={consentBusy}
+                  />
+                  上記に同意します
+                </label>
+                {consentError && <p className="consent-error">{consentError}</p>}
+                <button
+                  type="button"
+                  className="submit-btn"
+                  onClick={submitConsent}
+                  disabled={!consentChecked || consentBusy}
+                >
+                  {consentSubmitting ? '保存中...' : '同意して開始'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {isPinModalOpen && (
+            <div className="modal-overlay" onClick={() => {}}>
+              <div className="modal pin-modal">
+                <div className="modal-header">
+                  <h2>パスワード入力</h2>
+                  <p className="pin-tip">アプリ起動時は4桁のパスワードで日記・予定を暗号化します。</p>
+                </div>
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!/^[0-9]{4}$/.test(pinInput)) {
+                    setCryptoError('4桁の数字で入力してください');
+                    return;
+                  }
+                  setCryptoError('');
+                  setPin(pinInput);
+                  setRecords([]);
+                  setIsPinModalOpen(false);
+                }}>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    maxLength={4}
+                    className="pin-input"
+                    placeholder="例: 1234"
+                    value={pinInput}
+                    onChange={(e) => setPinInput(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                    autoFocus
+                    required
+                  />
+                  <button type="submit" className="submit-btn">決定</button>
+                  <p className="pin-footnote">※ パスワードは端末には保存せず、このセッションのみで利用します。</p>
+                </form>
+              </div>
+            </div>
+          )}
+          </div>
+          <button className="fab" onClick={openCreateModal} title="投稿を追加">
+            <Plus size={32} strokeWidth={3} />
+          </button>
+    </>
+  );
+}
+
+export default App;

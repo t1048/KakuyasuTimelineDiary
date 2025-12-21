@@ -1,0 +1,88 @@
+openapi: "3.0.1"
+info:
+  title: "Kakuyasu Timeline Diary API"
+  version: "1.0.0"
+
+# 全てのAPIに認証を適用
+security:
+  - KakuyasuTimelineAuth: []
+
+paths:
+  /consent:
+    get:
+      summary: "同意確認"
+      responses:
+        "200":
+          description: "OK"
+      x-amazon-apigateway-integration:
+        uri: "${KakuyasuTimelineFunctionArn}"
+        httpMethod: "POST"
+        type: "aws_proxy"
+        payloadFormatVersion: "2.0"
+
+    post:
+      summary: "同意登録"
+      responses:
+        "200":
+          description: "OK"
+      x-amazon-apigateway-integration:
+        uri: "${KakuyasuTimelineFunctionArn}"
+        httpMethod: "POST"
+        type: "aws_proxy"
+        payloadFormatVersion: "2.0"
+
+  /items:
+    get:
+      summary: "全件取得"
+      responses:
+        "200":
+          description: "OK"
+      x-amazon-apigateway-integration:
+        uri: "${KakuyasuTimelineFunctionArn}"
+        httpMethod: "POST"
+        type: "aws_proxy"
+        payloadFormatVersion: "2.0"
+
+    post:
+      summary: "新規作成"
+      responses:
+        "200":
+          description: "Created"
+      x-amazon-apigateway-integration:
+        uri: "${KakuyasuTimelineFunctionArn}"
+        httpMethod: "POST"
+        type: "aws_proxy"
+        payloadFormatVersion: "2.0"
+
+    # ★ ここにあった options (mock) は削除しました。
+    # API Gateway の機能（x-amazon-apigateway-cors）が自動で応答します。
+
+  /items/{id}:
+    delete:
+      summary: "削除"
+      parameters:
+        - name: "id"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+      responses:
+        "200":
+          description: "Deleted"
+      x-amazon-apigateway-integration:
+        uri: "${KakuyasuTimelineFunctionArn}"
+        httpMethod: "POST"
+        type: "aws_proxy"
+        payloadFormatVersion: "2.0"
+
+components:
+  securitySchemes:
+    KakuyasuTimelineAuth:
+      type: oauth2
+      x-amazon-apigateway-authorizer:
+        type: jwt
+        identitySource: "$request.header.Authorization"
+        jwtConfiguration:
+          audience:
+            - "${ClientId}"
+          issuer: "https://cognito-idp.${Region}.amazonaws.com/${UserPoolId}"
