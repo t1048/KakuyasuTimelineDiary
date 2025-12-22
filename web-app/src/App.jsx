@@ -55,6 +55,7 @@ function App() {
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isFabMenuOpen, setIsFabMenuOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [previewItem, setPreviewItem] = useState(null);
   const [editingItem, setEditingItem] = useState(null);
@@ -98,6 +99,8 @@ function App() {
 
   const [formData, setFormData] = useState({
     date: new Date().toISOString().split('T')[0],
+    startDate: new Date().toISOString().split('T')[0],
+    endDate: new Date().toISOString().split('T')[0],
     startTime: '',
     endTime: '',
     title: '',
@@ -799,18 +802,22 @@ function App() {
     const tags = extractHashtags(formData.content);
     const isEvent = hasTag(tags, '#予定');
     const id = baseId || (crypto.randomUUID ? crypto.randomUUID() : createQueueId());
+    const startDate = formData.startDate || formData.date;
+    const endDate = formData.endDate || startDate;
     const draft = {
       id,
       name: formData.title,
       content: formData.content,
       tag: tags,
-      date: formData.date
+      date: startDate
     };
 
     if (isEvent) {
-      draft.startTime = `${formData.date}T${formData.startTime || '00:00'}:00`;
-      if (formData.endTime) {
-        draft.endTime = `${formData.date}T${formData.endTime}:00`;
+      const startTimePart = formData.startTime || '00:00';
+      const endTimePart = formData.endTime || (endDate !== startDate ? '23:59' : '');
+      draft.startTime = `${startDate}T${startTimePart}:00`;
+      if (endTimePart || endDate !== startDate) {
+        draft.endTime = `${endDate}T${(endTimePart || startTimePart)}:00`;
       }
     } else {
       const nowTime = new Date().toTimeString().slice(0, 8);
@@ -1027,6 +1034,14 @@ function App() {
 
   const handleSaveItem = async () => {
     if (!ensurePin()) return;
+    if (formIsEvent) {
+      const startDate = formData.startDate || formData.date;
+      const endDate = formData.endDate || startDate;
+      if (endDate < startDate) {
+        alert('終了日は開始日以降にしてください');
+        return;
+      }
+    }
     const draft = buildDraftFromForm(editingItem?.id);
     updateRecordsWithItem(draft);
     let queued = false;
@@ -1074,23 +1089,46 @@ function App() {
     return '';
   };
 
-  const resetFormData = () => {
+  const getDefaultFormData = () => {
     const now = new Date();
     const dateStr = now.toISOString().split('T')[0];
     const timeStr = now.toTimeString().slice(0, 5);
-    setFormData({
+    return {
       date: dateStr,
+      startDate: dateStr,
+      endDate: dateStr,
       startTime: timeStr,
       endTime: '',
       title: '',
       content: '',
       quickPost: false
-    });
+    };
+  };
+
+  const resetFormData = () => {
+    setFormData(getDefaultFormData());
   };
 
   const openCreateModal = () => {
     setEditingItem(null);
-    resetFormData();
+    setIsFabMenuOpen(!isFabMenuOpen);
+  };
+
+  const openNoteModal = () => {
+    setIsFabMenuOpen(false);
+    setFormData({
+      ...getDefaultFormData(),
+      content: '#日記'
+    });
+    setIsModalOpen(true);
+  };
+
+  const openEventModal = () => {
+    setIsFabMenuOpen(false);
+    setFormData({
+      ...getDefaultFormData(),
+      content: '#予定'
+    });
     setIsModalOpen(true);
   };
 
@@ -1105,27 +1143,36 @@ function App() {
     setEditingItem(item);
     const isEvent = isEventItem(item);
     let date = item.date;
+    let startDate = date;
+    let endDate = date;
     let startTime = '';
     let endTime = '';
     let content = item.content || '';
 
     if (isEvent && item.startTime) {
-      date = item.startTime.split('T')[0];
+      startDate = item.startTime.split('T')[0];
+      date = startDate;
       startTime = item.startTime.split('T')[1]?.slice(0, 5) || '';
       if (item.endTime) {
+        endDate = item.endTime.split('T')[0];
         endTime = item.endTime.split('T')[1]?.slice(0, 5) || '';
       }
       content = ensureTag(content, '#予定');
     } else if (item.published) {
       date = item.published.split('T')[0];
+      startDate = date;
+      endDate = date;
     }
 
     setFormData({
       date,
+      startDate,
+      endDate,
       startTime,
       endTime,
       title: item.name || '',
-      content
+      content,
+      quickPost: formData.quickPost || false
     });
     setIsModalOpen(true);
   };
@@ -1484,7 +1531,7 @@ function App() {
                           <button 
                             className="week-day-add-btn"
                             onClick={() => {
-                              setFormData(prev => ({...prev, date: day.date}));
+                              setFormData(prev => ({...prev, date: day.date, startDate: day.date, endDate: day.date}));
                               setIsModalOpen(true);
                             }}
                             title="この日に投稿を追加"
@@ -1530,6 +1577,8 @@ function App() {
         {/* End of .app-container */}
 
         {/* Modals rendered outside .app-container for proper viewport positioning */}
+
+
         {isModalOpen && (
             <div className="form-screen">
               <div className="form-screen-header">
@@ -1548,8 +1597,33 @@ function App() {
                       <label>日付</label>
                       <input type="date" className="input-field" 
                         value={formData.date} 
-                        onChange={e => setFormData({...formData, date: e.target.value})} required />
+                        onChange={e => {
+                          const nextDate = e.target.value;
+                          setFormData(prev => ({
+                            ...prev,
+                            date: nextDate,
+                            startDate: prev.startDate === prev.date ? nextDate : prev.startDate,
+                            endDate: prev.endDate === prev.date ? nextDate : prev.endDate
+                          }));
+                        }} required />
                     </div>
+
+                    {formIsEvent && (
+                      <div className="form-group" style={{display:'flex', gap:10}}>
+                        <div style={{flex:1}}>
+                          <label>開始日（任意）</label>
+                          <input type="date" className="input-field"
+                            value={formData.startDate}
+                            onChange={e => setFormData({...formData, startDate: e.target.value || formData.date})} />
+                        </div>
+                        <div style={{flex:1}}>
+                          <label>終了日（任意）</label>
+                          <input type="date" className="input-field"
+                            value={formData.endDate}
+                            onChange={e => setFormData({...formData, endDate: e.target.value || formData.startDate || formData.date})} />
+                        </div>
+                      </div>
+                    )}
 
                     {formIsEvent && (
                       <div className="form-group" style={{display:'flex', gap:10}}>
@@ -1676,6 +1750,8 @@ function App() {
                               isEvent: formIsEvent,
                               title: formData.title,
                               content: formData.content,
+                                  startDate: formData.startDate,
+                                  endDate: formData.endDate,
                               startTime: formData.startTime,
                               endTime: formData.endTime
                             });
@@ -1703,14 +1779,17 @@ function App() {
                             onClick={() => {
                               const templateIsEvent = template.isEvent || hasTag(extractHashtags(template.content || ''), '#予定');
                               const nextContent = templateIsEvent ? ensureTag(template.content, '#予定') : template.content;
-                              setFormData({
-                                date: formData.date,
-                                startTime: template.startTime || formData.startTime,
-                                endTime: template.endTime || '',
+                              setFormData(prev => ({
+                                ...prev,
+                                date: prev.date,
+                                startDate: template.startDate || prev.startDate || prev.date,
+                                endDate: template.endDate || prev.endDate || template.startDate || prev.startDate || prev.date,
+                                startTime: template.startTime || prev.startTime,
+                                endTime: template.endTime || prev.endTime || '',
                                 title: template.title,
                                 content: nextContent,
-                                quickPost: formData.quickPost
-                              });
+                                quickPost: prev.quickPost
+                              }));
                               setIsTemplatePanelOpen(false);
                             }}
                           >
@@ -1744,9 +1823,27 @@ function App() {
           )}
 
           {consentIsAgreed && !isPinModalOpen && !isModalOpen && (
-            <button className="fab" onClick={openCreateModal} title="投稿を追加">
-              <Plus size={32} strokeWidth={3} />
-            </button>
+            <div className={`fab-container ${isFabMenuOpen ? 'open' : ''}`}>
+              {isFabMenuOpen && (
+                <div className="fab-menu">
+                  <button className="fab-item note-fab" onClick={openNoteModal} title="日記・メモ">
+                    <span className="fab-label">投稿</span>
+                    <div className="fab-icon">
+                      <FileText size={24} />
+                    </div>
+                  </button>
+                  <button className="fab-item event-fab" onClick={openEventModal} title="予定">
+                    <span className="fab-label">予定</span>
+                    <div className="fab-icon">
+                      <CalendarDays size={24} />
+                    </div>
+                  </button>
+                </div>
+              )}
+              <button className={`fab ${isFabMenuOpen ? 'active' : ''}`} onClick={openCreateModal} title={isFabMenuOpen ? "閉じる" : "投稿を追加"}>
+                {isFabMenuOpen ? <X size={32} strokeWidth={3} /> : <Plus size={32} strokeWidth={3} />}
+              </button>
+            </div>
           )}
 
           {isDayModalOpen && selectedDate && (
@@ -1863,7 +1960,7 @@ function App() {
 
                 <div className="day-modal-actions">
                   <button className="submit-btn" onClick={() => {
-                    setFormData(prev => ({...prev, date: selectedDate}));
+                    setFormData(prev => ({...prev, date: selectedDate, startDate: selectedDate, endDate: selectedDate}));
                     setIsModalOpen(true);
                     closeDayModal();
                   }}>

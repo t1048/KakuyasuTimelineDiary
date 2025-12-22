@@ -141,6 +141,8 @@ export const saveTemplate = (template) => {
       isEvent: template.isEvent,
       title: template.title,
       content: template.content,
+      startDate: template.startDate || '',
+      endDate: template.endDate || '',
       startTime: template.startTime || '',
       endTime: template.endTime || '',
       createdAt: new Date().toISOString()
