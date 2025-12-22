@@ -1526,9 +1526,11 @@ function App() {
               </>
             )}
           </main>
-          </div>
+        </div>
+        {/* End of .app-container */}
 
-          {isModalOpen && (
+        {/* Modals rendered outside .app-container for proper viewport positioning */}
+        {isModalOpen && (
             <div className="form-screen">
               <div className="form-screen-header">
                 <h2 className="form-screen-title">{editingItem ? '編集' : '新規投稿'}</h2>
