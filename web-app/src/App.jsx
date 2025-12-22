@@ -2119,6 +2119,7 @@ function App() {
                     placeholder="例: 1234"
                     value={pinInput}
                     onChange={(e) => setPinInput(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                    autoComplete="new-password"
                     autoFocus
                     required
                   />
