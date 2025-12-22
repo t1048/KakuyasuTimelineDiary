@@ -533,6 +533,8 @@
   letter-spacing: 0.3em;
   text-align: center;
   margin-bottom: 16px;
+  -webkit-text-security: disc;
+  text-security: disc;
 }
 .pin-input:focus {
   outline: none;
@@ -1761,5 +1763,4 @@ textarea.input-field {
   font-weight: 600;
   border: 1px solid #bbdefb;
 }
-
 

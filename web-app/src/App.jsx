@@ -2208,7 +2208,7 @@ function App() {
                   setIsPinModalOpen(false);
                 }}>
                   <input
-                    type="password"
+                    type="text"
                     inputMode="numeric"
                     pattern="[0-9]*"
                     maxLength={4}
@@ -2216,7 +2216,7 @@ function App() {
                     placeholder="例: 1234"
                     value={pinInput}
                     onChange={(e) => setPinInput(e.target.value.replace(/\D/g, '').slice(0, 4))}
-                    autoComplete="new-password"
+                    autoComplete="one-time-code"
                     autoFocus
                     required
                   />
