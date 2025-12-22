@@ -1526,6 +1526,7 @@ function App() {
               </>
             )}
           </main>
+          </div>
 
           {isModalOpen && (
             <div className="form-screen">
@@ -1738,6 +1739,12 @@ function App() {
                 </div>
               </div>
             </div>
+          )}
+
+          {consentIsAgreed && !isPinModalOpen && !isModalOpen && (
+            <button className="fab" onClick={openCreateModal} title="投稿を追加">
+              <Plus size={32} strokeWidth={3} />
+            </button>
           )}
 
           {isDayModalOpen && selectedDate && (
@@ -2118,12 +2125,6 @@ function App() {
                 </form>
               </div>
             </div>
-          )}
-          </div>
-          {consentIsAgreed && !isPinModalOpen && !isModalOpen && (
-            <button className="fab" onClick={openCreateModal} title="投稿を追加">
-              <Plus size={32} strokeWidth={3} />
-            </button>
           )}
     </>
   );
