@@ -1526,8 +1526,11 @@ function App() {
               </>
             )}
           </main>
+        </div>
+        {/* End of .app-container */}
 
-          {isModalOpen && (
+        {/* Modals rendered outside .app-container for proper viewport positioning */}
+        {isModalOpen && (
             <div className="form-screen">
               <div className="form-screen-header">
                 <h2 className="form-screen-title">{editingItem ? '編集' : '新規投稿'}</h2>
@@ -1738,6 +1741,12 @@ function App() {
                 </div>
               </div>
             </div>
+          )}
+
+          {consentIsAgreed && !isPinModalOpen && !isModalOpen && (
+            <button className="fab" onClick={openCreateModal} title="投稿を追加">
+              <Plus size={32} strokeWidth={3} />
+            </button>
           )}
 
           {isDayModalOpen && selectedDate && (
@@ -2118,12 +2127,6 @@ function App() {
                 </form>
               </div>
             </div>
-          )}
-          </div>
-          {consentIsAgreed && !isPinModalOpen && !isModalOpen && (
-            <button className="fab" onClick={openCreateModal} title="投稿を追加">
-              <Plus size={32} strokeWidth={3} />
-            </button>
           )}
     </>
   );
