@@ -18,6 +18,7 @@ aws_region = os.environ.get('AWS_REGION', 'ap-northeast-1')
 s3_client = boto3.client(
     's3',
     region_name=aws_region,
+    endpoint_url=f"https://s3.{aws_region}.amazonaws.com",
     config=Config(signature_version='s3v4')
 )
 user_content_bucket = os.environ.get('USER_CONTENT_BUCKET')
@@ -166,15 +167,18 @@ def lambda_handler(event, context):
                 for entry in day_item.get('orderedItems', []):
                     image_key = entry.get('imageKey')
                     if image_key:
-                        try:
-                            url = s3_client.generate_presigned_url(
-                                'get_object',
-                                Params={'Bucket': user_content_bucket, 'Key': image_key},
-                                ExpiresIn=3600
-                            )
-                            entry['imageUrl'] = url
-                        except Exception as e:
-                            print(f"Error generating presigned URL: {e}")
+                        if cloudfront_domain:
+                            entry['imageUrl'] = f"https://{cloudfront_domain}/{image_key}"
+                        else:
+                            try:
+                                url = s3_client.generate_presigned_url(
+                                    'get_object',
+                                    Params={'Bucket': user_content_bucket, 'Key': image_key},
+                                    ExpiresIn=3600
+                                )
+                                entry['imageUrl'] = url
+                            except Exception as e:
+                                print(f"Error generating presigned URL: {e}")
             
             return {
                 "statusCode": 200, 
@@ -210,14 +214,6 @@ def lambda_handler(event, context):
                     },
                     ExpiresIn=300
                 )
-                
-                # CloudFront経由のURLに変換（CloudFrontドメインが設定されている場合）
-                if cloudfront_domain:
-                    # S3のURLをCloudFront URLに置き換え
-                    presigned_url = presigned_url.replace(
-                        f"s3.{aws_region}.amazonaws.com/{user_content_bucket}",
-                        cloudfront_domain
-                    )
                 
                 return {
                     "statusCode": 200,

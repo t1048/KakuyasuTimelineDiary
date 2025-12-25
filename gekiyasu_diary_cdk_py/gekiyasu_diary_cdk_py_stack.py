@@ -56,15 +56,6 @@ class GekiyasuDiaryCdkPyStack(Stack):
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             encryption=s3.BucketEncryption.S3_MANAGED,
             enforce_ssl=True,
-            # CloudFront経由でアクセスするため、最小限のCORS設定
-            cors=[
-                s3.CorsRule(
-                    allowed_methods=[s3.HttpMethods.PUT, s3.HttpMethods.GET, s3.HttpMethods.HEAD],
-                    allowed_origins=["*"],
-                    allowed_headers=["*"],
-                    max_age=3000
-                )
-            ]
         )
         user_content_bucket.grant_read_write(handler)
 
@@ -155,8 +146,8 @@ class GekiyasuDiaryCdkPyStack(Stack):
                 "/users/*": cloudfront.BehaviorOptions(
                     origin=origins.S3BucketOrigin.with_origin_access_control(user_content_bucket),
                     viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-                    allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
-                    cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
+                    allowed_methods=cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+                    cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
                 )
             },
             error_responses=[
@@ -167,6 +158,19 @@ class GekiyasuDiaryCdkPyStack(Stack):
                     ttl=Duration.seconds(0)
                 )
             ]
+        )
+
+        user_content_bucket.add_cors_rule(
+            allowed_methods=[
+                s3.HttpMethods.PUT,
+                s3.HttpMethods.POST,
+                s3.HttpMethods.GET,
+                s3.HttpMethods.HEAD,
+            ],
+            allowed_origins=["*"],
+            allowed_headers=["*"],
+            exposed_headers=["ETag", "x-amz-request-id", "x-amz-id-2"],
+            max_age=3000
         )
 
         # Cognito Invite Email Template
@@ -197,6 +201,8 @@ class GekiyasuDiaryCdkPyStack(Stack):
                 distribution=distribution,
                 distribution_paths=["/*"]
             )
+
+        handler.add_environment("CLOUDFRONT_DOMAIN_NAME", distribution.distribution_domain_name)
 
         # 7. Outputs
         CfnOutput(self, "ApiUrl", value=f"https://{api.ref}.execute-api.{self.region}.amazonaws.com")

@@ -1157,8 +1157,9 @@ function App() {
       try {
         const processedBlob = await processImage(selectedImage);
         const { cipherBlob, saltB64, ivB64 } = await encryptBlobWithPin(pin, processedBlob);
-        const { uploadUrl, imageKey: key } = await getUploadUrl(selectedImage.name, 'application/octet-stream');
-        await uploadFile(uploadUrl, cipherBlob, 'application/octet-stream');
+        const uploadContentType = processedBlob.type || selectedImage.type || 'application/octet-stream';
+        const { uploadUrl, imageKey: key } = await getUploadUrl(selectedImage.name, uploadContentType);
+        await uploadFile(uploadUrl, cipherBlob, uploadContentType);
         draft.imageKey = key;
         draft.imageSalt = saltB64;
         draft.imageIv = ivB64;
@@ -1297,8 +1298,9 @@ function App() {
       if (selectedImage) {
         const processedBlob = await processImage(selectedImage);
         const { cipherBlob, saltB64, ivB64 } = await encryptBlobWithPin(pin, processedBlob);
-        const { uploadUrl, imageKey: key } = await getUploadUrl(selectedImage.name, 'application/octet-stream');
-        await uploadFile(uploadUrl, cipherBlob, 'application/octet-stream');
+        const uploadContentType = processedBlob.type || selectedImage.type || 'application/octet-stream';
+        const { uploadUrl, imageKey: key } = await getUploadUrl(selectedImage.name, uploadContentType);
+        await uploadFile(uploadUrl, cipherBlob, uploadContentType);
         imageKey = key;
         imageUrl = URL.createObjectURL(processedBlob);
         imageSalt = saltB64;
