@@ -1,7 +1,9 @@
 import json
 import os
+import re
 import uuid
 import boto3
+from botocore.config import Config
 import datetime
 from decimal import Decimal
 from boto3.dynamodb.conditions import Key
@@ -11,7 +13,32 @@ dynamodb = boto3.resource('dynamodb')
 table_name = os.environ.get('TABLE_NAME', 'KakuyasuTimelineDiary')
 table = dynamodb.Table(table_name)
 
+# S3初期化
+aws_region = os.environ.get('AWS_REGION')
+s3_client = boto3.client(
+    's3',
+    region_name=aws_region,
+    config=Config(signature_version='s3v4')
+)
+user_content_bucket = os.environ.get('USER_CONTENT_BUCKET')
+
 CONSENT_VERSION = "2025-12-21"
+ALLOWED_UPLOAD_CONTENT_TYPES = {
+    "application/octet-stream",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+
+def sanitize_filename(file_name):
+    if not file_name or not isinstance(file_name, str):
+        return None
+    normalized = file_name.strip().replace("\\", "/")
+    base_name = os.path.basename(normalized)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", base_name)
+    if safe_name in ("", ".", ".."):
+        return None
+    return safe_name[:120]
 
 # Decimal型をJSONシリアライズするためのエンコーダー
 class DecimalEncoder(json.JSONEncoder):
@@ -132,12 +159,70 @@ def lambda_handler(event, context):
             )
             
             items = response.get('Items', [])
+
+            # 画像の署名付きURLを生成
+            for day_item in items:
+                for entry in day_item.get('orderedItems', []):
+                    image_key = entry.get('imageKey')
+                    if image_key:
+                        try:
+                            url = s3_client.generate_presigned_url(
+                                'get_object',
+                                Params={'Bucket': user_content_bucket, 'Key': image_key},
+                                ExpiresIn=3600
+                            )
+                            entry['imageUrl'] = url
+                        except Exception as e:
+                            print(f"Error generating presigned URL: {e}")
             
             return {
                 "statusCode": 200, 
                 "headers": headers, 
                 "body": json.dumps(items, cls=DecimalEncoder)
             }
+
+        # ------------------------------------------------------------------
+        # POST: アップロード用URL取得
+        # ------------------------------------------------------------------
+        elif route_key == "POST /upload-url":
+            body = json.loads(event.get('body', '{}'))
+            file_name = sanitize_filename(body.get('fileName')) or f"{uuid.uuid4()}.jpg"
+            content_type = body.get('contentType', 'application/octet-stream')
+
+            if content_type not in ALLOWED_UPLOAD_CONTENT_TYPES:
+                return {
+                    "statusCode": 400,
+                    "headers": headers,
+                    "body": json.dumps({"error": "Unsupported content type"})
+                }
+            
+            # ユーザーごとのフォルダに保存
+            image_key = f"users/{user_id}/{file_name}"
+            
+            try:
+                presigned_url = s3_client.generate_presigned_url(
+                    'put_object',
+                    Params={
+                        'Bucket': user_content_bucket,
+                        'Key': image_key,
+                        'ContentType': content_type
+                    },
+                    ExpiresIn=300
+                )
+                return {
+                    "statusCode": 200,
+                    "headers": headers,
+                    "body": json.dumps({
+                        "uploadUrl": presigned_url,
+                        "imageKey": image_key
+                    })
+                }
+            except Exception as e:
+                return {
+                    "statusCode": 500,
+                    "headers": headers,
+                    "body": json.dumps({"error": str(e)})
+                }
 
         # ------------------------------------------------------------------
         # POST: データを保存 (ActivityPub Object)

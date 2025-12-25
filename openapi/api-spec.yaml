@@ -75,6 +75,18 @@ paths:
         type: "aws_proxy"
         payloadFormatVersion: "2.0"
 
+  /upload-url:
+    post:
+      summary: "アップロード用URL取得"
+      responses:
+        "200":
+          description: "OK"
+      x-amazon-apigateway-integration:
+        uri: "${KakuyasuTimelineFunctionArn}"
+        httpMethod: "POST"
+        type: "aws_proxy"
+        payloadFormatVersion: "2.0"
+
 components:
   securitySchemes:
     KakuyasuTimelineAuth:

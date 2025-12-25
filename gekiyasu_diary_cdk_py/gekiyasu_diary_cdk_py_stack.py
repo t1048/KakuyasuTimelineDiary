@@ -3,6 +3,7 @@ from aws_cdk import (
     RemovalPolicy,
     CfnOutput,
     Duration,
+    Fn,
     aws_dynamodb as dynamodb,
     aws_lambda as _lambda,
     aws_apigatewayv2 as apigatewayv2,
@@ -39,9 +40,40 @@ class GekiyasuDiaryCdkPyStack(Stack):
             code=_lambda.Code.from_asset("lambda"),
             handler="app.lambda_handler",
             architecture=_lambda.Architecture.ARM_64,
-            environment={"TABLE_NAME": table.table_name},
+            environment={
+                "TABLE_NAME": table.table_name,
+                "USER_CONTENT_BUCKET": "kakuyasu-timeline-user-content-" + self.account
+            },
         )
         table.grant_read_write_data(handler)
+
+        # 2.5 User Content Bucket
+        user_content_bucket = s3.Bucket(
+            self, "UserContentBucket",
+            bucket_name="kakuyasu-timeline-user-content-" + self.account,
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True,
+            cors=[
+                s3.CorsRule(
+                    allowed_methods=[
+                        s3.HttpMethods.GET,
+                        s3.HttpMethods.PUT,
+                        s3.HttpMethods.POST,
+                        s3.HttpMethods.DELETE,
+                        s3.HttpMethods.HEAD,
+                    ],
+                    allowed_origins=["*"],
+                    allowed_headers=["*"],
+                    # S3 does not accept wildcard for exposed headers. List common response headers explicitly.
+                    exposed_headers=["ETag", "x-amz-request-id", "x-amz-id-2", "Content-Type", "Content-Length", "Content-Encoding", "Cache-Control"],
+                    max_age=3000
+                )
+            ]
+        )
+        user_content_bucket.grant_read_write(handler)
 
         # ==========================================
         # ★ 3. Cognito User Pool (セルフサインアップ + 管理者承認)
@@ -49,8 +81,8 @@ class GekiyasuDiaryCdkPyStack(Stack):
         user_pool = cognito.UserPool(
             self, "KakuyasuTimelineUserPool",
             user_pool_name="kakuyasu-timeline-diary-user-pool",
-            # セルフサインアップを許可し、メールまたは電話番号で登録可能
-            self_sign_up_enabled=True,
+            # セルフサインアップを無効化し、メールまたは電話番号で登録可能
+            self_sign_up_enabled=False,
             sign_in_aliases=cognito.SignInAliases(
                 email=True,
                 phone=True
@@ -86,8 +118,8 @@ class GekiyasuDiaryCdkPyStack(Stack):
         spec_dict = yaml.safe_load(spec_content)
 
         spec_dict["x-amazon-apigateway-cors"] = {
-            "allowMethods": ["GET", "POST", "DELETE", "OPTIONS"],
-            "allowHeaders": ["Content-Type", "Authorization"],
+            "allowMethods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allowHeaders": ["*"],
             "allowOrigins": ["*"],
             "maxAge": 600
         }
@@ -133,6 +165,24 @@ class GekiyasuDiaryCdkPyStack(Stack):
                     ttl=Duration.seconds(0)
                 )
             ]
+        )
+
+        # Cognito Invite Email Template
+        cfn_user_pool = user_pool.node.default_child
+        cfn_user_pool.admin_create_user_config = cognito.CfnUserPool.AdminCreateUserConfigProperty(
+            allow_admin_create_user_only=True,
+            invite_message_template=cognito.CfnUserPool.InviteMessageTemplateProperty(
+                email_subject="Kakuyasu Timeline Diary への招待",
+                email_message=Fn.join("", [
+                    "Kakuyasu Timeline Diary へようこそ！\n\n",
+                    "以下のURLからログインしてください。\n",
+                    "https://", distribution.distribution_domain_name, "\n\n",
+                    "ユーザー名: {username}\n",
+                    "初期パスワード: {####}\n\n",
+                    "初回ログイン時にパスワードの変更が求められます。"
+                ]),
+                sms_message="Kakuyasu Timeline Diary への招待です。ユーザー名:{username} 一時パスワード:{####}"
+            )
         )
 
         # 6. Deployment

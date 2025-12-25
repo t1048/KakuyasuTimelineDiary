@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Amplify } from 'aws-amplify';
 import { useAuthenticator } from '@aws-amplify/ui-react';
 import '@aws-amplify/ui-react/styles.css';
-import { getItems, createItem, deleteItem, getConsent, setConsent, getTemplates, saveTemplate, deleteTemplate, generateRecurringInstancesForDate, getOutbox, enqueueOutboxEntry, removeOutboxEntry, updateOutboxEntry } from './api';
-import { Calendar, Clock, Trash2, Plus, X, LogOut, FileText, ChevronLeft, ChevronRight, KeyRound, AlertCircle, List, Settings, Pencil, Hash, CalendarDays } from 'lucide-react';
+import { getItems, createItem, deleteItem, getConsent, setConsent, getTemplates, saveTemplate, deleteTemplate, generateRecurringInstancesForDate, getOutbox, enqueueOutboxEntry, removeOutboxEntry, updateOutboxEntry, getUploadUrl, uploadFile } from './api';
+import { Calendar, Clock, Trash2, Plus, X, LogOut, FileText, ChevronLeft, ChevronRight, KeyRound, AlertCircle, List, Settings, Pencil, Hash, CalendarDays, Camera, Send } from 'lucide-react';
 import './App.css';
 
 Amplify.configure({
@@ -81,6 +81,10 @@ function App() {
   const [consentSubmitting, setConsentSubmitting] = useState(false);
   const [hashtagQuery, setHashtagQuery] = useState('');
   const [showTagSuggestions, setShowTagSuggestions] = useState(false);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatSubmitting, setIsChatSubmitting] = useState(false);
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [imagePreview, setImagePreview] = useState(null);
   const notificationSupported = typeof window !== 'undefined' && 'Notification' in window;
   // データキャッシュ: キーは "YYYY-MM" 形式
   const [dataCache, setDataCache] = useState({});
@@ -233,6 +237,18 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (isModalOpen && contentTextareaRef.current) {
+      // モーダルが開いたときにフォーカスを当て、カーソルを先頭に移動する
+      const textarea = contentTextareaRef.current;
+      const timer = setTimeout(() => {
+        textarea.focus();
+        textarea.setSelectionRange(0, 0);
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [isModalOpen]);
+
   const textEncoder = useMemo(() => new TextEncoder(), []);
   const textDecoder = useMemo(() => new TextDecoder(), []);
 
@@ -243,7 +259,14 @@ function App() {
     return match ? match[1] : '';
   };
 
-  const hasTag = (tags, tagName) => (tags || []).some(tag => tag.name === tagName);
+  const getTagName = (tag) => {
+    if (!tag) return '';
+    if (typeof tag === 'string') return tag;
+    if (typeof tag.name === 'string') return tag.name;
+    if (typeof tag.name === 'object' && typeof tag.name.name === 'string') return tag.name.name;
+    return '';
+  };
+  const hasTag = (tags, tagName) => (tags || []).some(tag => getTagName(tag) === tagName);
   const inferItemKind = (item) => {
     if (hasTag(item.tag, '#予定')) return 'event';
     if (hasTag(item.tag, '#日記')) return 'note';
@@ -251,10 +274,16 @@ function App() {
     return 'note';
   };
   const isEventItem = (item) => inferItemKind(item) === 'event';
+  const getItemDate = (item) => {
+    if (item.startTime) return item.startTime.split('T')[0];
+    if (item.published) return item.published.split('T')[0];
+    return item.date || '';
+  };
   const ensureTag = (content, tag) => {
-    if (!content) return tag;
+    if (!content) return `\n\n${tag}`;
     if (content.includes(tag)) return content;
-    return `${content} ${tag}`;
+    const suffix = content.endsWith('\n\n') ? '' : (content.endsWith('\n') ? '\n' : '\n\n');
+    return `${content}${suffix}${tag}`;
   };
 
   const deriveKey = async (pinCode, salt) => {
@@ -479,18 +508,28 @@ function App() {
       setLoading(true);
       const data = await getItems(currentYear, currentMonth);
       
-      // Decrypt all items in orderedItems
+      // Decrypt all items in orderedItems and fetch/decrypt images
       const decryptedRecords = await Promise.all(data.map(async (dayRecord) => {
         const recordDate = extractDateFromSk(dayRecord.sk) || dayRecord.date;
         const items = dayRecord.orderedItems || [];
         const decryptedItems = await Promise.all(items.map(async (item) => {
           try {
-            return {
-              ...item,
-              name: await decryptText(pin, item.name),
-              content: await decryptText(pin, item.content),
-              decrypted: true
-            };
+            const name = await decryptText(pin, item.name);
+            const content = await decryptText(pin, item.content);
+            let imageUrl = item.imageUrl;
+            if (item.imageKey && item.imageUrl && item.imageSalt && item.imageIv) {
+              try {
+                const res = await fetch(item.imageUrl, { mode: 'cors' });
+                if (res.ok) {
+                  const buffer = await res.arrayBuffer();
+                  const decryptedBlob = await decryptArrayBufferWithPin(pin, item.imageSalt, item.imageIv, buffer);
+                  imageUrl = URL.createObjectURL(decryptedBlob);
+                }
+              } catch (e) {
+                console.warn('Image decrypt/fetch failed', e);
+              }
+            }
+            return { ...item, name, content, imageUrl, decrypted: true };
           } catch (e) {
             return {
               ...item,
@@ -545,6 +584,16 @@ function App() {
     }
   };
 
+  // 「今日」フィルタ選択時は、週／カレンダー表示が今日を含むように表示日時を更新する
+  useEffect(() => {
+    if (dateRangeFilter === 'today') {
+      const t = new Date();
+      setCurrentYear(t.getFullYear());
+      setCurrentMonth(t.getMonth() + 1);
+      setWeekViewStartDate(t);
+    }
+  }, [dateRangeFilter]);
+
   // Flatten records to timeline items
   const timelineItems = useMemo(() => {
     const allItems = [];
@@ -556,12 +605,13 @@ function App() {
         }
       });
     });
+    const getSortTime = (item) => {
+      const timeStr = item.startTime || item.published || item.date;
+      const parsed = Date.parse(timeStr);
+      return Number.isNaN(parsed) ? 0 : parsed;
+    };
     // Sort by published/startTime desc
-    return allItems.sort((a, b) => {
-      const timeA = a.startTime || a.published || a.date;
-      const timeB = b.startTime || b.published || b.date;
-      return timeB.localeCompare(timeA);
-    });
+    return allItems.sort((a, b) => getSortTime(b) - getSortTime(a));
   }, [records]);
 
   useEffect(() => {
@@ -589,13 +639,47 @@ function App() {
   const availableTags = useMemo(() => {
     const tags = new Set();
     timelineItems.forEach(item => {
-      (item.tag || []).forEach(t => tags.add(t.name));
+      (item.tag || []).forEach((t) => {
+        const name = getTagName(t);
+        if (name) tags.add(name);
+      });
     });
     return Array.from(tags).sort();
   }, [timelineItems]);
 
-  const filteredItems = useMemo(() => {
+  const baseFilteredItems = useMemo(() => {
     let items = timelineItems;
+
+    // タイプフィルター
+    if (typeFilter !== 'all') {
+      items = items.filter(item => {
+        const kind = inferItemKind(item);
+        if (typeFilter === 'note') return kind === 'note';
+        if (typeFilter === 'event') return kind === 'event';
+        return true;
+      });
+    }
+
+    // ハッシュタグフィルター
+    if (filterTag) {
+      items = items.filter(item => (item.tag || []).some(t => getTagName(t) === filterTag));
+    }
+
+    // テキスト検索
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase();
+      items = items.filter(item => {
+        const titleMatch = (item.name || '').toLowerCase().includes(query);
+        const contentMatch = (item.content || '').toLowerCase().includes(query);
+        return titleMatch || contentMatch;
+      });
+    }
+
+    return items;
+  }, [timelineItems, filterTag, typeFilter, searchQuery]);
+
+  const timelineFilteredItems = useMemo(() => {
+    let items = baseFilteredItems;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
@@ -621,45 +705,28 @@ function App() {
       });
     }
 
-    // タイプフィルター
-    if (typeFilter !== 'all') {
-      items = items.filter(item => {
-        const kind = inferItemKind(item);
-        if (typeFilter === 'note') return kind === 'note';
-        if (typeFilter === 'event') return kind === 'event';
-        return true;
-      });
-    }
-
-    // ハッシュタグフィルター
-    if (filterTag) {
-      items = items.filter(item => (item.tag || []).some(t => t.name === filterTag));
-    }
-
-    // テキスト検索
-    if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase();
-      items = items.filter(item => {
-        const titleMatch = (item.name || '').toLowerCase().includes(query);
-        const contentMatch = (item.content || '').toLowerCase().includes(query);
-        return titleMatch || contentMatch;
-      });
-    }
-
     return items;
-  }, [timelineItems, filterTag, dateRangeFilter, typeFilter, searchQuery]);
+  }, [baseFilteredItems, dateRangeFilter]);
 
   const calendarDays = useMemo(() => {
     const days = [];
     const firstDay = new Date(currentYear, currentMonth - 1, 1);
     const lastDay = new Date(currentYear, currentMonth, 0);
     
+    // ローカル日付文字列を生成するヘルパー関数
+    const toDateString = (dateObj) => {
+      const year = dateObj.getFullYear();
+      const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+      const date = String(dateObj.getDate()).padStart(2, '0');
+      return `${year}-${month}-${date}`;
+    };
+    
     // Previous month padding
     const startPadding = firstDay.getDay(); // 0 (Sun) to 6 (Sat)
     for (let i = startPadding - 1; i >= 0; i--) {
       const d = new Date(currentYear, currentMonth - 1, -i);
       days.push({
-        date: d.toISOString().split('T')[0],
+        date: toDateString(d),
         day: d.getDate(),
         isCurrentMonth: false
       });
@@ -668,12 +735,12 @@ function App() {
     // Current month days
     for (let i = 1; i <= lastDay.getDate(); i++) {
       const d = new Date(currentYear, currentMonth - 1, i);
-      const dateStr = d.toISOString().split('T')[0];
+      const dateStr = toDateString(d);
       days.push({
         date: dateStr,
         day: i,
         isCurrentMonth: true,
-        items: records.find(r => r.date === dateStr)?.orderedItems || []
+        items: baseFilteredItems.filter(item => getItemDate(item) === dateStr)
       });
     }
     
@@ -683,7 +750,7 @@ function App() {
       for (let i = 1; i <= remaining; i++) {
         const d = new Date(currentYear, currentMonth, i);
         days.push({
-          date: d.toISOString().split('T')[0],
+          date: toDateString(d),
           day: i,
           isCurrentMonth: false
         });
@@ -691,7 +758,7 @@ function App() {
     }
     
     return days;
-  }, [currentYear, currentMonth, records]);
+  }, [currentYear, currentMonth, baseFilteredItems]);
 
   // 週間ビュー用データ計算
   const weekViewDays = useMemo(() => {
@@ -703,19 +770,18 @@ function App() {
       const date = new Date(startDate);
       date.setDate(startDate.getDate() + i);
       const dateStr = date.toISOString().split('T')[0];
-      const dayRecord = records.find(r => r.date === dateStr);
       
       days.push({
         date: dateStr,
         day: date.getDate(),
         dayOfWeek: ['日', '月', '火', '水', '木', '金', '土'][date.getDay()],
-        items: dayRecord?.orderedItems || [],
+        items: baseFilteredItems.filter(item => getItemDate(item) === dateStr),
         isToday: dateStr === new Date().toISOString().split('T')[0]
       });
     }
     
     return days;
-  }, [weekViewStartDate, records]);
+  }, [weekViewStartDate, baseFilteredItems]);
 
   // 統計データ計算
   const statistics = useMemo(() => {
@@ -735,8 +801,9 @@ function App() {
     const tagFrequency = {};
     timelineItems.forEach(item => {
       if (item.date.startsWith(monthStr)) {
-        (item.tag || []).forEach(t => {
-          tagFrequency[t.name] = (tagFrequency[t.name] || 0) + 1;
+        (item.tag || []).forEach((t) => {
+          const name = getTagName(t);
+          if (name) tagFrequency[name] = (tagFrequency[name] || 0) + 1;
         });
       }
     });
@@ -792,15 +859,9 @@ function App() {
   const createQueueId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const currentMonthKey = `${currentYear}-${String(currentMonth).padStart(2, '0')}`;
 
-  const getItemDate = (item) => {
-    if (item.startTime) return item.startTime.split('T')[0];
-    if (item.published) return item.published.split('T')[0];
-    return item.date || '';
-  };
-
   const buildDraftFromForm = (baseId) => {
     const tags = extractHashtags(formData.content);
-    const isEvent = hasTag(tags, '#予定');
+    const isEvent = hasTag(tags.map(name => ({ name })), '#予定');
     const id = baseId || (crypto.randomUUID ? crypto.randomUUID() : createQueueId());
     const startDate = formData.startDate || formData.date;
     const endDate = formData.endDate || startDate;
@@ -808,8 +869,10 @@ function App() {
       id,
       name: formData.title,
       content: formData.content,
-      tag: tags,
-      date: startDate
+      tag: tags.map(name => ({ name })),
+      date: startDate,
+      imageKey: editingItem?.imageKey,
+      imageUrl: editingItem?.imageUrl
     };
 
     if (isEvent) {
@@ -832,7 +895,10 @@ function App() {
       id: draft.id,
       name: await encryptText(pin, draft.name),
       content: await encryptText(pin, draft.content),
-      tag: draft.tag
+      tag: draft.tag,
+      imageKey: draft.imageKey,
+      imageSalt: draft.imageSalt,
+      imageIv: draft.imageIv
     };
 
     if (draft.startTime) {
@@ -845,10 +911,39 @@ function App() {
     return payload;
   };
 
-  const updateRecordsWithItem = (draft) => {
+  // --- 画像バイナリ暗号化 / 復号ユーティリティ ---
+  const bufToBase64 = (buffer) => toBase64(buffer);
+  const base64ToBuf = (s) => fromBase64(s);
+
+  const encryptBlobWithPin = async (pinCode, blob) => {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveKey(pinCode, salt);
+    const arrayBuffer = await blob.arrayBuffer();
+    const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, arrayBuffer);
+    const cipherBlob = new Blob([new Uint8Array(encrypted)], { type: 'application/octet-stream' });
+    return { cipherBlob, saltB64: bufToBase64(salt), ivB64: bufToBase64(iv) };
+  };
+
+  const decryptArrayBufferWithPin = async (pinCode, saltB64, ivB64, cipherArrayBuffer) => {
+    const salt = base64ToBuf(saltB64);
+    const iv = base64ToBuf(ivB64);
+    const key = await deriveKey(pinCode, salt);
+    const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, cipherArrayBuffer);
+    return new Blob([new Uint8Array(decrypted)], { type: 'image/jpeg' });
+  };
+
+  const updateRecordsWithItem = (draft, oldDate) => {
     const itemDate = getItemDate(draft);
     if (!itemDate) return;
-    const updateDayRecords = (recordList) => {
+
+    const removeById = (recordList) =>
+      recordList.map((day) => ({
+        ...day,
+        orderedItems: (day.orderedItems || []).filter((item) => item.id !== draft.id)
+      }));
+
+    const upsertTo = (recordList) => {
       let found = false;
       const next = recordList.map((day) => {
         const filtered = (day.orderedItems || []).filter((item) => item.id !== draft.id);
@@ -864,13 +959,26 @@ function App() {
       return next;
     };
 
-    const monthKey = `${itemDate.split('-')[0]}-${itemDate.split('-')[1]}`;
-    setRecords((prev) => (monthKey === currentMonthKey ? updateDayRecords(prev) : prev));
+    const newMonthKey = `${itemDate.split('-')[0]}-${itemDate.split('-')[1]}`;
+    const oldMonthKey = oldDate ? `${oldDate.split('-')[0]}-${oldDate.split('-')[1]}` : null;
+
+    // 現在表示中のレコードを更新
+    setRecords((prev) => {
+      if (newMonthKey === currentMonthKey) return upsertTo(prev);
+      if (oldMonthKey === currentMonthKey) return removeById(prev);
+      return prev;
+    });
+
+    // キャッシュを更新
     setDataCache((prev) => {
-      if (!prev[monthKey] && monthKey !== currentMonthKey) return prev;
-      const base = prev[monthKey] || records;
-      const updated = updateDayRecords(base);
-      return { ...prev, [monthKey]: updated };
+      const next = { ...prev };
+      if (next[newMonthKey]) {
+        next[newMonthKey] = upsertTo(next[newMonthKey]);
+      }
+      if (oldMonthKey && oldMonthKey !== newMonthKey && next[oldMonthKey]) {
+        next[oldMonthKey] = removeById(next[oldMonthKey]);
+      }
+      return next;
     });
   };
 
@@ -1043,7 +1151,52 @@ function App() {
       }
     }
     const draft = buildDraftFromForm(editingItem?.id);
-    updateRecordsWithItem(draft);
+    const oldDate = editingItem ? getItemDate(editingItem) : null;
+
+    if (selectedImage) {
+      try {
+        const processedBlob = await processImage(selectedImage);
+        const { cipherBlob, saltB64, ivB64 } = await encryptBlobWithPin(pin, processedBlob);
+        const { uploadUrl, imageKey: key } = await getUploadUrl(selectedImage.name, 'application/octet-stream');
+        await uploadFile(uploadUrl, cipherBlob, 'application/octet-stream');
+        draft.imageKey = key;
+        draft.imageSalt = saltB64;
+        draft.imageIv = ivB64;
+        draft.imageUrl = URL.createObjectURL(processedBlob);
+      } catch (error) {
+        console.error("Image upload failed:", error);
+        alert(`画像のアップロードに失敗しました: ${error.message || error}`);
+        setSyncState('error');
+        return;
+      }
+    } else if (editingItem && !imagePreview) {
+      // 画像が削除された場合
+      draft.imageKey = null;
+      draft.imageUrl = null;
+    }
+
+    // 日付が変更された場合、古いレコードを削除する必要がある（DynamoDBのSKが日付ベースのため）
+    if (editingItem) {
+      const oldParams = buildDeleteParams(editingItem);
+      const newParams = buildDeleteParams(draft);
+      const dateChanged = oldParams.startDate !== newParams.startDate || oldParams.endDate !== newParams.endDate;
+
+      if (dateChanged) {
+        if (!isOnline) {
+          enqueueDelete(oldParams);
+        } else {
+          try {
+            await deleteItem(oldParams);
+          } catch (error) {
+            console.error("Failed to delete old record during date change:", error);
+            enqueueDelete(oldParams);
+            setSyncState('error');
+          }
+        }
+      }
+    }
+
+    updateRecordsWithItem(draft, oldDate);
     let queued = false;
     if (!isOnline) {
       enqueueCreate(draft);
@@ -1066,6 +1219,162 @@ function App() {
     closeModal();
     resetFormData();
   };
+
+  const processImage = async (file) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+
+          const MAX_WIDTH = 800;
+          const MAX_HEIGHT = 800;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > MAX_WIDTH) {
+              height *= MAX_WIDTH / width;
+              width = MAX_WIDTH;
+            }
+          } else {
+            if (height > MAX_HEIGHT) {
+              width *= MAX_HEIGHT / height;
+              height = MAX_HEIGHT;
+            }
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+
+          // セピアフィルタの適用
+          ctx.filter = 'sepia(0.8) contrast(1.1) brightness(0.95)';
+          ctx.drawImage(img, 0, 0, width, height);
+
+          canvas.toBlob((blob) => {
+            resolve(blob);
+          }, 'image/jpeg', 0.5);
+        };
+        img.onerror = reject;
+        img.src = e.target.result;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleImageChange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    setSelectedImage(file);
+    const reader = new FileReader();
+    reader.onload = (ev) => setImagePreview(ev.target.result);
+    reader.readAsDataURL(file);
+  };
+
+  const handleChatSubmit = async (e) => {
+    if (e) e.preventDefault();
+    if ((!chatInput.trim() && !selectedImage) || isChatSubmitting) return;
+    if (!ensurePin()) return;
+
+    setIsChatSubmitting(true);
+    try {
+      const now = new Date();
+      const dateStr = now.toISOString().split('T')[0];
+      
+      let content = chatInput.trim();
+      if (!content.includes('#')) {
+        content = `${content}\n\n#日記`;
+      }
+
+      let imageKey = null;
+      let imageUrl = null;
+      let imageSalt = null;
+      let imageIv = null;
+
+      if (selectedImage) {
+        const processedBlob = await processImage(selectedImage);
+        const { cipherBlob, saltB64, ivB64 } = await encryptBlobWithPin(pin, processedBlob);
+        const { uploadUrl, imageKey: key } = await getUploadUrl(selectedImage.name, 'application/octet-stream');
+        await uploadFile(uploadUrl, cipherBlob, 'application/octet-stream');
+        imageKey = key;
+        imageUrl = URL.createObjectURL(processedBlob);
+        imageSalt = saltB64;
+        imageIv = ivB64;
+      }
+
+      const draft = {
+        id: createQueueId(),
+        date: dateStr,
+        published: now.toISOString(),
+        content: content,
+        name: '',
+        tag: extractHashtags(content).map(name => ({ name })),
+        imageKey,
+        imageUrl,
+        imageSalt,
+        imageIv
+      };
+
+      updateRecordsWithItem(draft, null);
+      
+      if (!isOnline) {
+        enqueueCreate(draft);
+      } else {
+        try {
+          const payload = await buildPayloadFromDraft(draft);
+          await createItem(payload);
+        } catch (error) {
+          console.error(error);
+          enqueueCreate(draft);
+          setSyncState('error');
+        }
+      }
+      
+      setChatInput('');
+      setSelectedImage(null);
+      setImagePreview(null);
+    } catch (e) {
+      console.error(e);
+      setCryptoError('送信に失敗しました。');
+    } finally {
+      setIsChatSubmitting(false);
+    }
+  };
+
+  const getRelativeTime = (dateStr) => {
+    if (!dateStr) return '';
+    const now = new Date();
+    const date = new Date(dateStr);
+    const diffMs = now - date;
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+    const diffHour = Math.floor(diffMin / 60);
+    const diffDay = Math.floor(diffHour / 24);
+
+    if (diffSec < 60) return 'たった今';
+    if (diffMin < 60) return `${diffMin}分前`;
+    if (diffHour < 24) return `${diffHour}時間前`;
+    if (diffDay < 7) return `${diffDay}日前`;
+    return dateStr.split('T')[0];
+  };
+
+  const onThisDayItems = useMemo(() => {
+    const today = new Date();
+    const mmdd = `${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const items = [];
+    records.forEach(record => {
+      if (record.date.endsWith(mmdd) && record.date !== today.toISOString().split('T')[0]) {
+        record.orderedItems.forEach(item => {
+          items.push({ ...item, year: record.date.split('-')[0] });
+        });
+      }
+    });
+    return items.sort((a, b) => b.year - a.year);
+  }, [records]);
 
   const getSyncMessage = () => {
     if (!isOnline) {
@@ -1118,8 +1427,10 @@ function App() {
     setIsFabMenuOpen(false);
     setFormData({
       ...getDefaultFormData(),
-      content: '#日記'
+      content: '\n\n#日記'
     });
+    setSelectedImage(null);
+    setImagePreview(null);
     setIsModalOpen(true);
   };
 
@@ -1127,8 +1438,10 @@ function App() {
     setIsFabMenuOpen(false);
     setFormData({
       ...getDefaultFormData(),
-      content: '#予定'
+      content: '\n\n#予定'
     });
+    setSelectedImage(null);
+    setImagePreview(null);
     setIsModalOpen(true);
   };
 
@@ -1174,12 +1487,16 @@ function App() {
       content,
       quickPost: formData.quickPost || false
     });
+    setSelectedImage(null);
+    setImagePreview(item.imageUrl || null);
     setIsModalOpen(true);
   };
 
   const closeModal = () => {
     setIsModalOpen(false);
     setEditingItem(null);
+    setSelectedImage(null);
+    setImagePreview(null);
   };
 
   const closeDayModal = () => {
@@ -1195,7 +1512,7 @@ function App() {
   const extractHashtags = (text) => {
     const regex = /#[\w\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF\uFF66-\uFF9F]+/g;
     const matches = text.match(regex);
-    return matches ? matches.map(tag => ({ type: 'Hashtag', name: tag })) : [];
+    return matches ? matches : [];
   };
 
   const getHashtagQueryAtCursor = (text, cursorPos) => {
@@ -1229,7 +1546,7 @@ function App() {
       const before = value.slice(0, cursorPos);
       const after = value.slice(cursorPos);
       const inHashtag = /#[^\s#]+$/.test(before);
-      const prefix = inHashtag ? ' ' : (before && !before.endsWith('\n') ? '\n' : '');
+      const prefix = inHashtag ? ' ' : (before ? (before.endsWith('\n\n') ? '' : (before.endsWith('\n') ? '\n' : '\n\n')) : '\n\n');
       newValue = `${before}${prefix}${tag}${after}`;
       nextCursorPos = before.length + prefix.length + tag.length;
     }
@@ -1433,11 +1750,6 @@ function App() {
           <main className="main-content">
             {loading ? (
               <p className="loading">読み込み中...</p>
-            ) : filteredItems.length === 0 ? (
-              <div className="empty-state">
-                <FileText size={48} color="#e0e0e0" style={{marginBottom: 20}} />
-                <p>表示するアイテムがありません。<br/>新しい投稿を作成しましょう！</p>
-              </div>
             ) : (
               <>
                 {getSyncMessage() && (
@@ -1464,37 +1776,66 @@ function App() {
                 )}
 
                 {viewMode === 'timeline' ? (
-                  <div className="timeline-list">
-                    {filteredItems.map((item) => (
-                      <div key={item.id} className={`card ${isEventItem(item) ? 'schedule' : 'diary'}`}>
-                        <div className="card-header">
-                          <div className="card-header-meta">
-                            <span className="date-badge">
-                              {isEventItem(item) ? <Clock size={12} style={{marginRight:4}}/> : <FileText size={12} style={{marginRight:4}}/>}
-                              {isEventItem(item)
-                                ? `${item.startTime?.split('T')[0]} ${item.startTime?.split('T')[1]?.slice(0,5) || ''}` 
-                                : item.published?.split('T')[0]}
-                            </span>
-                            <span className="user-id-badge">ID: {userIdLabel}</span>
+                  timelineFilteredItems.length === 0 ? (
+                    <div className="empty-state">
+                      <FileText size={48} color="#e0e0e0" style={{marginBottom: 20}} />
+                      <p>表示するアイテムがありません。<br/>新しい投稿を作成しましょう！</p>
+                    </div>
+                  ) : (
+                    <div className="timeline-list">
+                      {onThisDayItems.length > 0 && (
+                        <div className="on-this-day-section">
+                          <h3 className="section-title">✨ 過去の今日の記録</h3>
+                          <div className="on-this-day-grid">
+                            {onThisDayItems.map(item => (
+                              <div key={item.id} className="on-this-day-card" onClick={() => openEditModal(item)}>
+                                <div className="on-this-day-year">{item.year}年</div>
+                                <div className="on-this-day-content">{item.content.slice(0, 50)}...</div>
+                              </div>
+                            ))}
                           </div>
-                          <div className="card-actions">
-                            <button className="icon-btn" onClick={() => openEditModal(item)} title="編集">
-                              <Pencil size={16} />
+                        </div>
+                      )}
+
+                      {timelineFilteredItems.map((item) => (
+                      <div key={item.id} className={`sns-post ${isEventItem(item) ? 'event' : 'note'}`}>
+                        <div className="post-header">
+                          <div className="post-user-info">
+                            <div className="post-avatar">{userIdLabel[0].toUpperCase()}</div>
+                            <div className="post-meta">
+                              <span className="post-user-id">ID: {userIdLabel}</span>
+                              <span className="post-time">
+                                {isEventItem(item) ? <Clock size={10} /> : null}
+                                {getRelativeTime(isEventItem(item) ? item.startTime : item.published)}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="post-actions">
+                            <button className="post-action-btn" onClick={() => openEditModal(item)}>
+                              <Pencil size={14} />
                             </button>
-                            <button className="delete-btn" onClick={() => {
+                            <button className="post-action-btn delete" onClick={() => {
                               if (!confirm('削除しますか？')) return;
                               handleDeleteItem(item);
                             }}>
-                              <Trash2 size={18} />
+                              <Trash2 size={14} />
                             </button>
                           </div>
                         </div>
-                        {item.name && <h3>{item.name}</h3>}
-                        <p className="content">{renderContentWithTags(item.content)}</p>
+                        <div className="post-body">
+                          {item.name && <h4 className="post-title">{item.name}</h4>}
+                          <div className="post-content">{renderContentWithTags(item.content)}</div>
+                          {item.imageUrl && (
+                            <div className="post-image">
+                              <img src={item.imageUrl} alt="Post" loading="lazy" />
+                            </div>
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>
-                ) : viewMode === 'week' ? (
+                )
+              ) : viewMode === 'week' ? (
                   <div className="week-view-panel">
                     <div className="week-nav">
                       <button onClick={() => setWeekViewStartDate(new Date(weekViewStartDate.getTime() - 7 * 24 * 60 * 60 * 1000))} className="week-nav-btn">
@@ -1514,19 +1855,11 @@ function App() {
                             <div className="week-day-name">{day.dayOfWeek}</div>
                             <div className="week-day-num">{day.day}</div>
                           </div>
-                          <div className="week-day-items">
-                            {day.items.map(item => (
-                              <div 
-                                key={item.id} 
-                                className={`week-item ${isEventItem(item) ? 'event' : 'note'}`}
-                                title={item.name}
-                              >
-                                {isEventItem(item) && item.startTime && (
-                                  <div className="week-item-time">{item.startTime.split('T')[1]?.slice(0, 5)}</div>
-                                )}
-                                <div className="week-item-title">{item.name || '（無題）'}</div>
-                              </div>
-                            ))}
+                          <div className="week-day-items" onClick={() => openDayModal(day.date)} style={{ cursor: 'pointer', justifyContent: 'center', alignItems: 'center' }}>
+                            <div className="day-items" style={{ gap: '8px' }}>
+                              {day.items?.some(item => !isEventItem(item)) && <div className="day-item-dot note" style={{ width: '10px', height: '10px' }} title="日記あり" />}
+                              {day.items?.some(item => isEventItem(item)) && <div className="day-item-dot event" style={{ width: '10px', height: '10px' }} title="予定あり" />}
+                            </div>
                           </div>
                           <button 
                             className="week-day-add-btn"
@@ -1561,9 +1894,8 @@ function App() {
                         >
                           <span className="day-number">{day.day}</span>
                           <div className="day-items">
-                            {day.items?.map(item => (
-                              <div key={item.id} className={`day-item-dot ${isEventItem(item) ? 'event' : 'note'}`} title={item.name} />
-                            ))}
+                            {day.items?.some(item => !isEventItem(item)) && <div className="day-item-dot note" title="日記あり" />}
+                            {day.items?.some(item => isEventItem(item)) && <div className="day-item-dot event" title="予定あり" />}
                           </div>
                         </button>
                       ))}
@@ -1573,8 +1905,61 @@ function App() {
               </>
             )}
           </main>
+
         </div>
         {/* End of .app-container */}
+
+        {consentIsAgreed && !isPinModalOpen && (
+          <div className="chat-bar-container">
+            {imagePreview && (
+              <div className="chat-image-preview">
+                <img src={imagePreview} alt="Preview" />
+                <button className="remove-image-btn" onClick={() => { setSelectedImage(null); setImagePreview(null); }}>
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+            <div className="quick-tags">
+              <button className="quick-tag-btn" onClick={() => setChatInput(prev => prev + ' #🔥')}>🔥</button>
+              <button className="quick-tag-btn" onClick={() => setChatInput(prev => prev + ' #🍺')}>🍺</button>
+              <button className="quick-tag-btn" onClick={() => setChatInput(prev => prev + ' #💤')}>💤</button>
+              <button className="quick-tag-btn" onClick={() => setChatInput(prev => prev + ' #😋')}>😋</button>
+              <button className="quick-tag-btn" onClick={() => setChatInput(prev => prev + ' #散歩')}>🚶</button>
+            </div>
+            <form className="chat-bar" onSubmit={handleChatSubmit}>
+              <label className="chat-icon-btn" style={{ cursor: 'pointer' }}>
+                <Camera size={20} />
+                <input 
+                  type="file" 
+                  accept="image/*" 
+                  style={{ display: 'none' }} 
+                  onChange={handleImageChange}
+                />
+              </label>
+              <textarea 
+                className="chat-input" 
+                placeholder="今なにしてる？" 
+                value={chatInput}
+                onChange={(e) => {
+                  setChatInput(e.target.value);
+                  e.target.style.height = 'auto';
+                  e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    handleChatSubmit();
+                  }
+                }}
+                rows="1"
+                disabled={isChatSubmitting}
+              />
+              <button type="submit" className="chat-send-btn" disabled={(!chatInput.trim() && !selectedImage) || isChatSubmitting}>
+                <Send size={20} />
+              </button>
+            </form>
+          </div>
+        )}
 
         {/* Modals rendered outside .app-container for proper viewport positioning */}
 
@@ -1593,34 +1978,44 @@ function App() {
                     e.preventDefault();
                     handleSaveItem();
                   }}>
-                    <div className="form-group">
-                      <label>日付</label>
-                      <input type="date" className="input-field" 
-                        value={formData.date} 
-                        onChange={e => {
-                          const nextDate = e.target.value;
-                          setFormData(prev => ({
-                            ...prev,
-                            date: nextDate,
-                            startDate: prev.startDate === prev.date ? nextDate : prev.startDate,
-                            endDate: prev.endDate === prev.date ? nextDate : prev.endDate
-                          }));
-                        }} required />
-                    </div>
+                    {!formIsEvent && (
+                      <div className="form-group">
+                        <label>日付</label>
+                        <input type="date" className="input-field" 
+                          value={formData.date} 
+                          onChange={e => {
+                            const nextDate = e.target.value;
+                            setFormData(prev => ({
+                              ...prev,
+                              date: nextDate,
+                              startDate: prev.startDate === prev.date ? nextDate : prev.startDate,
+                              endDate: prev.endDate === prev.date ? nextDate : prev.endDate
+                            }));
+                          }} required />
+                      </div>
+                    )}
 
                     {formIsEvent && (
                       <div className="form-group" style={{display:'flex', gap:10}}>
                         <div style={{flex:1}}>
-                          <label>開始日（任意）</label>
+                          <label>開始日</label>
                           <input type="date" className="input-field"
                             value={formData.startDate}
-                            onChange={e => setFormData({...formData, startDate: e.target.value || formData.date})} />
+                            onChange={e => {
+                              const nextDate = e.target.value;
+                              setFormData(prev => ({
+                                ...prev,
+                                startDate: nextDate,
+                                date: nextDate,
+                                endDate: prev.endDate === prev.startDate ? nextDate : prev.endDate
+                              }));
+                            }} required />
                         </div>
                         <div style={{flex:1}}>
-                          <label>終了日（任意）</label>
+                          <label>終了日</label>
                           <input type="date" className="input-field"
                             value={formData.endDate}
-                            onChange={e => setFormData({...formData, endDate: e.target.value || formData.startDate || formData.date})} />
+                            onChange={e => setFormData({...formData, endDate: e.target.value})} required />
                         </div>
                       </div>
                     )}
@@ -1713,6 +2108,26 @@ function App() {
                           ))}
                         </div>
                       )}
+                    </div>
+
+                    <div className="form-group">
+                      <label>画像</label>
+                      <div className="image-upload-area">
+                        {imagePreview ? (
+                          <div className="modal-image-preview">
+                            <img src={imagePreview} alt="Preview" />
+                            <button type="button" className="remove-image-btn" onClick={() => { setSelectedImage(null); setImagePreview(null); }}>
+                              <X size={16} />
+                            </button>
+                          </div>
+                        ) : (
+                          <label className="image-upload-placeholder">
+                            <Camera size={32} />
+                            <span>画像を選択</span>
+                            <input type="file" accept="image/*" style={{display:'none'}} onChange={handleImageChange} />
+                          </label>
+                        )}
+                      </div>
                     </div>
 
                     {!formIsEvent && (
@@ -1912,6 +2327,11 @@ function App() {
                                 </div>
                               </div>
                               {item.content && <p className="item-content">{renderContentWithTags(item.content)}</p>}
+                              {item.imageUrl && (
+                                <div className="day-item-image">
+                                  <img src={item.imageUrl} alt="Post" loading="lazy" />
+                                </div>
+                              )}
                             </div>
                           ))}
                         </div>
@@ -1945,6 +2365,11 @@ function App() {
                                 </div>
                               </div>
                               {item.content && <p className="item-content">{renderContentWithTags(item.content)}</p>}
+                              {item.imageUrl && (
+                                <div className="day-item-image">
+                                  <img src={item.imageUrl} alt="Post" loading="lazy" />
+                                </div>
+                              )}
                             </div>
                           ))}
                         </div>

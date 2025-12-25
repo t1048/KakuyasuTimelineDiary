@@ -1,0 +1,19 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "ビルドとデプロイ (Build and Deploy)",
+			"type": "shell",
+			"command": "npm run build --prefix web-app; . .venv\\Scripts\\Activate.ps1; cdk deploy",
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			}
+		}
+	]
+}

@@ -75,6 +75,47 @@ export const setConsent = async ({ agreed, version }) => {
   return res.json();
 };
 
+export const getUploadUrl = async (fileName, contentType) => {
+  const headers = await getHeaders();
+  const res = await fetch(`${API_URL}/upload-url`, {
+    method: 'POST',
+    headers: headers,
+    body: JSON.stringify({ fileName, contentType }),
+  });
+  if (!res.ok) throw new Error('Failed to get upload URL');
+  return res.json();
+};
+
+export const uploadFile = async (url, file, contentType, extraHeaders = {}) => {
+  const headers = {
+    'Content-Type': contentType,
+    ...extraHeaders
+  };
+
+  // Debug: リクエスト前にヘッダを出力（CORS デバッグ用）
+  console.debug('Uploading file to S3 with headers:', headers, 'url:', url);
+
+  try {
+    const res = await fetch(url, {
+      method: 'PUT',
+      mode: 'cors',
+      headers,
+      body: file
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      console.error('File upload failed', { status: res.status, statusText: res.statusText, body: text, url });
+      throw new Error(`Failed to upload file: ${res.status} ${res.statusText} ${text}`);
+    }
+
+    return res;
+  } catch (err) {
+    console.error('Network error while uploading file:', err);
+    throw err;
+  }
+};
+
 // オフライン同期キュー（ローカルストレージ）
 const OUTBOX_STORAGE_KEY = 'diary_outbox';
 
