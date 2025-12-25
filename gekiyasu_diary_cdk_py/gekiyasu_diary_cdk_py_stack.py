@@ -56,19 +56,12 @@ class GekiyasuDiaryCdkPyStack(Stack):
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             encryption=s3.BucketEncryption.S3_MANAGED,
             enforce_ssl=True,
+            # CloudFront経由でアクセスするため、最小限のCORS設定
             cors=[
                 s3.CorsRule(
-                    allowed_methods=[
-                        s3.HttpMethods.GET,
-                        s3.HttpMethods.PUT,
-                        s3.HttpMethods.POST,
-                        s3.HttpMethods.DELETE,
-                        s3.HttpMethods.HEAD,
-                    ],
+                    allowed_methods=[s3.HttpMethods.PUT, s3.HttpMethods.GET, s3.HttpMethods.HEAD],
                     allowed_origins=["*"],
                     allowed_headers=["*"],
-                    # S3 does not accept wildcard for exposed headers. List common response headers explicitly.
-                    exposed_headers=["ETag", "x-amz-request-id", "x-amz-id-2", "Content-Type", "Content-Length", "Content-Encoding", "Cache-Control"],
                     max_age=3000
                 )
             ]
@@ -157,6 +150,15 @@ class GekiyasuDiaryCdkPyStack(Stack):
                 origin=origins.S3BucketOrigin.with_origin_access_control(website_bucket),
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
             ),
+            additional_behaviors={
+                # ユーザーコンテンツ（画像）へのリクエストはuser_content_bucketにルーティング
+                "/users/*": cloudfront.BehaviorOptions(
+                    origin=origins.S3BucketOrigin.with_origin_access_control(user_content_bucket),
+                    viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                    allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
+                    cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
+                )
+            },
             error_responses=[
                 cloudfront.ErrorResponse(
                     http_status=404,
@@ -199,5 +201,6 @@ class GekiyasuDiaryCdkPyStack(Stack):
         # 7. Outputs
         CfnOutput(self, "ApiUrl", value=f"https://{api.ref}.execute-api.{self.region}.amazonaws.com")
         CfnOutput(self, "CloudFrontUrl", value=f"https://{distribution.distribution_domain_name}")
+        CfnOutput(self, "CloudFrontDomain", value=distribution.distribution_domain_name)
         CfnOutput(self, "UserPoolId", value=user_pool.user_pool_id)
         CfnOutput(self, "UserPoolClientId", value=user_pool_client.user_pool_client_id)

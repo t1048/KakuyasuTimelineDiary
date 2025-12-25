@@ -1249,8 +1249,7 @@ function App() {
           canvas.width = width;
           canvas.height = height;
 
-          // セピアフィルタの適用
-          ctx.filter = 'sepia(0.8) contrast(1.1) brightness(0.95)';
+          ctx.filter = 'none';
           ctx.drawImage(img, 0, 0, width, height);
 
           canvas.toBlob((blob) => {

@@ -14,13 +14,14 @@ table_name = os.environ.get('TABLE_NAME', 'KakuyasuTimelineDiary')
 table = dynamodb.Table(table_name)
 
 # S3初期化
-aws_region = os.environ.get('AWS_REGION')
+aws_region = os.environ.get('AWS_REGION', 'ap-northeast-1')
 s3_client = boto3.client(
     's3',
     region_name=aws_region,
     config=Config(signature_version='s3v4')
 )
 user_content_bucket = os.environ.get('USER_CONTENT_BUCKET')
+cloudfront_domain = os.environ.get('CLOUDFRONT_DOMAIN_NAME')
 
 CONSENT_VERSION = "2025-12-21"
 ALLOWED_UPLOAD_CONTENT_TYPES = {
@@ -209,6 +210,15 @@ def lambda_handler(event, context):
                     },
                     ExpiresIn=300
                 )
+                
+                # CloudFront経由のURLに変換（CloudFrontドメインが設定されている場合）
+                if cloudfront_domain:
+                    # S3のURLをCloudFront URLに置き換え
+                    presigned_url = presigned_url.replace(
+                        f"s3.{aws_region}.amazonaws.com/{user_content_bucket}",
+                        cloudfront_domain
+                    )
+                
                 return {
                     "statusCode": 200,
                     "headers": headers,
@@ -216,6 +226,12 @@ def lambda_handler(event, context):
                         "uploadUrl": presigned_url,
                         "imageKey": image_key
                     })
+                }
+            except Exception as e:
+                return {
+                    "statusCode": 500,
+                    "headers": headers,
+                    "body": json.dumps({"error": str(e)})
                 }
             except Exception as e:
                 return {

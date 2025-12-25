@@ -1,6 +1,7 @@
 import { fetchAuthSession } from 'aws-amplify/auth';
 
 const API_URL = import.meta.env.VITE_API_URL;
+const CLOUDFRONT_DOMAIN = import.meta.env.VITE_CLOUDFRONT_DOMAIN;
 
 const getHeaders = async () => {
   try {
@@ -83,7 +84,17 @@ export const getUploadUrl = async (fileName, contentType) => {
     body: JSON.stringify({ fileName, contentType }),
   });
   if (!res.ok) throw new Error('Failed to get upload URL');
-  return res.json();
+  const data = await res.json();
+  
+  // CloudFrontドメインが設定されている場合は、S3 URLをCloudFront URLに置き換え
+  if (CLOUDFRONT_DOMAIN && data.uploadUrl) {
+    data.uploadUrl = data.uploadUrl.replace(
+      /https:\/\/s3\.[^.]+\.amazonaws\.com\/[^/]+\//,
+      `https://${CLOUDFRONT_DOMAIN}/`
+    );
+  }
+  
+  return data;
 };
 
 export const uploadFile = async (url, file, contentType, extraHeaders = {}) => {
