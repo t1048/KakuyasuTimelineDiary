@@ -274,6 +274,12 @@ function App() {
     return 'note';
   };
   const isEventItem = (item) => inferItemKind(item) === 'event';
+  const toLocalDateString = (dateObj) => {
+    const year = dateObj.getFullYear();
+    const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+    const date = String(dateObj.getDate()).padStart(2, '0');
+    return `${year}-${month}-${date}`;
+  };
   const getItemDate = (item) => {
     if (item.startTime) return item.startTime.split('T')[0];
     if (item.published) return item.published.split('T')[0];
@@ -713,20 +719,12 @@ function App() {
     const firstDay = new Date(currentYear, currentMonth - 1, 1);
     const lastDay = new Date(currentYear, currentMonth, 0);
     
-    // ローカル日付文字列を生成するヘルパー関数
-    const toDateString = (dateObj) => {
-      const year = dateObj.getFullYear();
-      const month = String(dateObj.getMonth() + 1).padStart(2, '0');
-      const date = String(dateObj.getDate()).padStart(2, '0');
-      return `${year}-${month}-${date}`;
-    };
-    
     // Previous month padding
     const startPadding = firstDay.getDay(); // 0 (Sun) to 6 (Sat)
     for (let i = startPadding - 1; i >= 0; i--) {
       const d = new Date(currentYear, currentMonth - 1, -i);
       days.push({
-        date: toDateString(d),
+        date: toLocalDateString(d),
         day: d.getDate(),
         isCurrentMonth: false
       });
@@ -735,7 +733,7 @@ function App() {
     // Current month days
     for (let i = 1; i <= lastDay.getDate(); i++) {
       const d = new Date(currentYear, currentMonth - 1, i);
-      const dateStr = toDateString(d);
+      const dateStr = toLocalDateString(d);
       days.push({
         date: dateStr,
         day: i,
@@ -750,7 +748,7 @@ function App() {
       for (let i = 1; i <= remaining; i++) {
         const d = new Date(currentYear, currentMonth, i);
         days.push({
-          date: toDateString(d),
+          date: toLocalDateString(d),
           day: i,
           isCurrentMonth: false
         });
@@ -765,18 +763,20 @@ function App() {
     const days = [];
     const startDate = new Date(weekViewStartDate);
     startDate.setDate(startDate.getDate() - startDate.getDay()); // 日曜から開始
+    startDate.setHours(0, 0, 0, 0);
+    const todayStr = toLocalDateString(new Date());
     
     for (let i = 0; i < 7; i++) {
       const date = new Date(startDate);
       date.setDate(startDate.getDate() + i);
-      const dateStr = date.toISOString().split('T')[0];
+      const dateStr = toLocalDateString(date);
       
       days.push({
         date: dateStr,
         day: date.getDate(),
         dayOfWeek: ['日', '月', '火', '水', '木', '金', '土'][date.getDay()],
         items: baseFilteredItems.filter(item => getItemDate(item) === dateStr),
-        isToday: dateStr === new Date().toISOString().split('T')[0]
+        isToday: dateStr === todayStr
       });
     }
     
@@ -1888,7 +1888,7 @@ function App() {
                         <button
                           key={i} 
                           type="button"
-                          className={`calendar-cell ${day.isCurrentMonth ? '' : 'other-month'} ${day.date === new Date().toISOString().split('T')[0] ? 'today' : ''}`}
+                          className={`calendar-cell ${day.isCurrentMonth ? '' : 'other-month'} ${day.date === toLocalDateString(new Date()) ? 'today' : ''}`}
                           onClick={() => day.isCurrentMonth ? openDayModal(day.date) : null}
                           disabled={!day.isCurrentMonth}
                           aria-label={`${day.date} ${day.isCurrentMonth ? '' : '(他の月)'} ${day.items?.length ? `${day.items.length}件` : ''}`.trim()}
