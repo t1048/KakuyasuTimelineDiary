@@ -101,15 +101,22 @@ function App() {
   const [currentYear, setCurrentYear] = useState(today.getFullYear());
   const [currentMonth, setCurrentMonth] = useState(today.getMonth() + 1);
 
-  const [formData, setFormData] = useState({
-    date: new Date().toISOString().split('T')[0],
-    startDate: new Date().toISOString().split('T')[0],
-    endDate: new Date().toISOString().split('T')[0],
-    startTime: '',
-    endTime: '',
-    title: '',
-    content: '',
-    quickPost: false
+  const [formData, setFormData] = useState(() => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const date = String(now.getDate()).padStart(2, '0');
+    const dateStr = `${year}-${month}-${date}`;
+    return {
+      date: dateStr,
+      startDate: dateStr,
+      endDate: dateStr,
+      startTime: '',
+      endTime: '',
+      title: '',
+      content: '',
+      quickPost: false
+    };
   });
 
   const getStoredPin = () => (typeof window === 'undefined') ? '' : (sessionStorage.getItem('diaryPin') || '');
@@ -1283,7 +1290,7 @@ function App() {
     setIsChatSubmitting(true);
     try {
       const now = new Date();
-      const dateStr = now.toISOString().split('T')[0];
+      const dateStr = toLocalDateString(now);
       
       let content = chatInput.trim();
       if (!content.includes('#')) {
@@ -1401,7 +1408,7 @@ function App() {
 
   const getDefaultFormData = () => {
     const now = new Date();
-    const dateStr = now.toISOString().split('T')[0];
+    const dateStr = toLocalDateString(now);
     const timeStr = now.toTimeString().slice(0, 5);
     return {
       date: dateStr,
