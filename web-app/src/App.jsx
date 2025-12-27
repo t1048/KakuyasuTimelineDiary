@@ -48,6 +48,14 @@ const CONSENT_ITEMS = [
   'メールアドレスや電話番号の入力が必要です。本人の同意なしに第三者提供はしませんが、アプリの維持が困難な場合は寄付のお願いを連絡する可能性があります。'
 ];
 
+// Helper function to format date in local timezone as YYYY-MM-DD
+const formatLocalDate = (dateObj) => {
+  const year = dateObj.getFullYear();
+  const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const date = String(dateObj.getDate()).padStart(2, '0');
+  return `${year}-${month}-${date}`;
+};
+
 function App() {
   const { user, signOut } = useAuthenticator();
   const userIdRaw = user?.userId || user?.username || '';
@@ -102,11 +110,7 @@ function App() {
   const [currentMonth, setCurrentMonth] = useState(today.getMonth() + 1);
 
   const [formData, setFormData] = useState(() => {
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const date = String(now.getDate()).padStart(2, '0');
-    const dateStr = `${year}-${month}-${date}`;
+    const dateStr = formatLocalDate(new Date());
     return {
       date: dateStr,
       startDate: dateStr,
@@ -1373,9 +1377,10 @@ function App() {
   const onThisDayItems = useMemo(() => {
     const today = new Date();
     const mmdd = `${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const todayStr = toLocalDateString(today);
     const items = [];
     records.forEach(record => {
-      if (record.date.endsWith(mmdd) && record.date !== today.toISOString().split('T')[0]) {
+      if (record.date.endsWith(mmdd) && record.date !== todayStr) {
         record.orderedItems.forEach(item => {
           items.push({ ...item, year: record.date.split('-')[0] });
         });
