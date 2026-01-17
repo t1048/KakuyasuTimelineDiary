@@ -48,6 +48,14 @@ const CONSENT_ITEMS = [
   'メールアドレスや電話番号の入力が必要です。本人の同意なしに第三者提供はしませんが、アプリの維持が困難な場合は寄付のお願いを連絡する可能性があります。'
 ];
 
+// Helper function to format date in local timezone as YYYY-MM-DD
+const formatLocalDate = (dateObj) => {
+  const year = dateObj.getFullYear();
+  const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const date = String(dateObj.getDate()).padStart(2, '0');
+  return `${year}-${month}-${date}`;
+};
+
 function App() {
   const { user, signOut } = useAuthenticator();
   const userIdRaw = user?.userId || user?.username || '';
@@ -108,15 +116,18 @@ function App() {
   const [currentYear, setCurrentYear] = useState(today.getFullYear());
   const [currentMonth, setCurrentMonth] = useState(today.getMonth() + 1);
 
-  const [formData, setFormData] = useState({
-    date: new Date().toISOString().split('T')[0],
-    startDate: new Date().toISOString().split('T')[0],
-    endDate: new Date().toISOString().split('T')[0],
-    startTime: '',
-    endTime: '',
-    title: '',
-    content: '',
-    quickPost: false
+  const [formData, setFormData] = useState(() => {
+    const dateStr = formatLocalDate(new Date());
+    return {
+      date: dateStr,
+      startDate: dateStr,
+      endDate: dateStr,
+      startTime: '',
+      endTime: '',
+      title: '',
+      content: '',
+      quickPost: false
+    };
   });
 
   const getStoredPin = () => (typeof window === 'undefined') ? '' : (sessionStorage.getItem('diaryPin') || '');
@@ -1324,7 +1335,7 @@ function App() {
     setIsChatSubmitting(true);
     try {
       const now = new Date();
-      const dateStr = now.toISOString().split('T')[0];
+      const dateStr = toLocalDateString(now);
       
       let content = chatInput.trim();
       if (!content.includes('#')) {
@@ -1438,9 +1449,10 @@ function App() {
   const onThisDayItems = useMemo(() => {
     const today = new Date();
     const mmdd = `${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const todayStr = toLocalDateString(today);
     const items = [];
     records.forEach(record => {
-      if (record.date.endsWith(mmdd) && record.date !== today.toISOString().split('T')[0]) {
+      if (record.date.endsWith(mmdd) && record.date !== todayStr) {
         record.orderedItems.forEach(item => {
           items.push({ ...item, year: record.date.split('-')[0] });
         });
@@ -1473,7 +1485,7 @@ function App() {
 
   const getDefaultFormData = () => {
     const now = new Date();
-    const dateStr = now.toISOString().split('T')[0];
+    const dateStr = toLocalDateString(now);
     const timeStr = now.toTimeString().slice(0, 5);
     return {
       date: dateStr,
