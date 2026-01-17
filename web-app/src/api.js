@@ -82,7 +82,22 @@ export const getUploadUrl = async (fileName, contentType) => {
     headers: headers,
     body: JSON.stringify({ fileName, contentType }),
   });
-  if (!res.ok) throw new Error('Failed to get upload URL');
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+
+    // 429エラー（アップロード上限超過）の場合
+    if (res.status === 429) {
+      const error = new Error(errorData.message || 'Monthly upload limit exceeded');
+      error.status = 429;
+      error.data = errorData;
+      throw error;
+    }
+
+    // その他のエラー
+    throw new Error(errorData.error || 'Failed to get upload URL');
+  }
+
   return res.json();
 };
 
@@ -114,6 +129,14 @@ export const uploadFile = async (url, file, contentType, extraHeaders = {}) => {
     console.error('Network error while uploading file:', err);
     throw err;
   }
+};
+
+export const getUploadStatus = async (month = null) => {
+  const headers = await getHeaders();
+  const query = month ? new URLSearchParams({ month }) : '';
+  const res = await fetch(`${API_URL}/upload-status${query ? '?' + query : ''}`, { headers });
+  if (!res.ok) throw new Error('Failed to fetch upload status');
+  return res.json();
 };
 
 // オフライン同期キュー（ローカルストレージ）

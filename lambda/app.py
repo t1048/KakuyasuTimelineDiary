@@ -31,6 +31,7 @@ ALLOWED_UPLOAD_CONTENT_TYPES = {
     "image/png",
     "image/webp",
 }
+MONTHLY_IMAGE_UPLOAD_LIMIT = 50
 
 def sanitize_filename(file_name):
     if not file_name or not isinstance(file_name, str):
@@ -56,6 +57,94 @@ def get_consent_item(user_id):
 
 def is_consent_valid(item):
     return bool(item) and item.get('agreed') is True and item.get('version') == CONSENT_VERSION
+
+def get_current_month_utc():
+    """
+    現在の年月をUTC基準で 'YYYY-MM' 形式で返す
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return f"{now.year}-{now.month:02}"
+
+def get_monthly_upload_count(user_id, month_str):
+    """
+    指定ユーザーの指定月のアップロード試行回数を取得
+
+    Args:
+        user_id: ユーザーID
+        month_str: 年月文字列 (例: '2026-01')
+
+    Returns:
+        int: アップロード試行回数（存在しない場合は0）
+    """
+    pk = f"USER#{user_id}#UPLOADS"
+    sk = f"MONTH#{month_str}"
+
+    try:
+        response = table.get_item(Key={'pk': pk, 'sk': sk})
+        item = response.get('Item')
+        if item:
+            # Decimal型をintに変換
+            return int(item.get('imageCount', 0))
+        return 0
+    except Exception as e:
+        print(f"Error getting monthly upload count: {e}")
+        # エラー時は安全側に倒して制限として扱う
+        return MONTHLY_IMAGE_UPLOAD_LIMIT
+
+def increment_monthly_upload_count(user_id, month_str):
+    """
+    指定ユーザーの指定月のアップロード試行回数をアトミックにインクリメント
+
+    Args:
+        user_id: ユーザーID
+        month_str: 年月文字列 (例: '2026-01')
+
+    Returns:
+        int: インクリメント後のカウント
+    """
+    pk = f"USER#{user_id}#UPLOADS"
+    sk = f"MONTH#{month_str}"
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    try:
+        # アトミックカウンターとしてADD操作を使用
+        # 存在しない場合は自動作成される
+        response = table.update_item(
+            Key={'pk': pk, 'sk': sk},
+            UpdateExpression='ADD imageCount :inc SET userId = :user_id, #month = :month, updatedAt = :updated_at',
+            ExpressionAttributeNames={
+                '#month': 'month'  # 'month'は予約語の可能性があるため
+            },
+            ExpressionAttributeValues={
+                ':inc': 1,
+                ':user_id': user_id,
+                ':month': month_str,
+                ':updated_at': now_iso
+            },
+            ReturnValues='ALL_NEW'
+        )
+
+        # 初回作成時のみcreatedAtを設定
+        if 'Attributes' in response:
+            attrs = response['Attributes']
+            if 'createdAt' not in attrs:
+                table.update_item(
+                    Key={'pk': pk, 'sk': sk},
+                    UpdateExpression='SET createdAt = :created_at',
+                    ExpressionAttributeValues={
+                        ':created_at': now_iso
+                    }
+                )
+
+            return int(attrs.get('imageCount', 1))
+
+        return 1
+    except Exception as e:
+        print(f"Error incrementing monthly upload count: {e}")
+        import traceback
+        traceback.print_exc()
+        # エラー時は例外を再送出して上位で処理
+        raise
 
 def lambda_handler(event, context):
     """
@@ -200,10 +289,48 @@ def lambda_handler(event, context):
                     "headers": headers,
                     "body": json.dumps({"error": "Unsupported content type"})
                 }
-            
+
+            # 月間アップロード制限チェック
+            current_month = get_current_month_utc()
+
+            try:
+                current_count = get_monthly_upload_count(user_id, current_month)
+
+                # 制限チェック
+                if current_count >= MONTHLY_IMAGE_UPLOAD_LIMIT:
+                    return {
+                        "statusCode": 429,
+                        "headers": headers,
+                        "body": json.dumps({
+                            "error": "Monthly upload limit exceeded",
+                            "message": f"月間アップロード上限（{MONTHLY_IMAGE_UPLOAD_LIMIT}枚）に達しました",
+                            "limit": MONTHLY_IMAGE_UPLOAD_LIMIT,
+                            "current": current_count,
+                            "month": current_month
+                        })
+                    }
+
+                # カウントをインクリメント（アトミック操作）
+                new_count = increment_monthly_upload_count(user_id, current_month)
+                print(f"Upload count incremented for user {user_id}: {new_count}/{MONTHLY_IMAGE_UPLOAD_LIMIT}")
+
+            except Exception as e:
+                # カウント取得・更新エラー時
+                print(f"Error checking/updating upload limit: {e}")
+                import traceback
+                traceback.print_exc()
+                return {
+                    "statusCode": 500,
+                    "headers": headers,
+                    "body": json.dumps({
+                        "error": "Failed to check upload limit",
+                        "details": str(e)
+                    })
+                }
+
             # ユーザーごとのフォルダに保存
             image_key = f"users/{user_id}/{file_name}"
-            
+
             try:
                 presigned_url = s3_client.generate_presigned_url(
                     'put_object',
@@ -214,13 +341,19 @@ def lambda_handler(event, context):
                     },
                     ExpiresIn=300
                 )
-                
+
                 return {
                     "statusCode": 200,
                     "headers": headers,
                     "body": json.dumps({
                         "uploadUrl": presigned_url,
-                        "imageKey": image_key
+                        "imageKey": image_key,
+                        "uploadLimit": {
+                            "limit": MONTHLY_IMAGE_UPLOAD_LIMIT,
+                            "used": new_count,
+                            "remaining": MONTHLY_IMAGE_UPLOAD_LIMIT - new_count,
+                            "month": current_month
+                        }
                     })
                 }
             except Exception as e:
@@ -228,6 +361,28 @@ def lambda_handler(event, context):
                     "statusCode": 500,
                     "headers": headers,
                     "body": json.dumps({"error": str(e)})
+                }
+
+        # ------------------------------------------------------------------
+        # GET: 月間アップロード状況取得
+        # ------------------------------------------------------------------
+        elif route_key == "GET /upload-status":
+            params = event.get('queryStringParameters') or {}
+            target_month = params.get('month') or get_current_month_utc()
+
+            try:
+                current_count = get_monthly_upload_count(user_id, target_month)
+
+                return {
+                    "statusCode": 200,
+                    "headers": headers,
+                    "body": json.dumps({
+                        "limit": MONTHLY_IMAGE_UPLOAD_LIMIT,
+                        "used": current_count,
+                        "remaining": max(0, MONTHLY_IMAGE_UPLOAD_LIMIT - current_count),
+                        "month": target_month,
+                        "isLimitReached": current_count >= MONTHLY_IMAGE_UPLOAD_LIMIT
+                    })
                 }
             except Exception as e:
                 return {

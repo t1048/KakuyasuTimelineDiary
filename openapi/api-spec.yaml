@@ -81,6 +81,102 @@ paths:
       responses:
         "200":
           description: "OK"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uploadUrl:
+                    type: string
+                    description: "S3への署名付きアップロードURL"
+                  imageKey:
+                    type: string
+                    description: "S3オブジェクトキー"
+                  uploadLimit:
+                    type: object
+                    description: "月間アップロード制限情報"
+                    properties:
+                      limit:
+                        type: integer
+                        description: "月間上限枚数"
+                      used:
+                        type: integer
+                        description: "今月使用済み枚数"
+                      remaining:
+                        type: integer
+                        description: "今月残り枚数"
+                      month:
+                        type: string
+                        description: "対象月 (YYYY-MM形式)"
+        "400":
+          description: "Bad Request - 不正なコンテンツタイプ"
+        "429":
+          description: "Too Many Requests - 月間アップロード上限超過"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Monthly upload limit exceeded"
+                  message:
+                    type: string
+                    example: "月間アップロード上限（50枚）に達しました"
+                  limit:
+                    type: integer
+                    example: 50
+                  current:
+                    type: integer
+                    example: 50
+                  month:
+                    type: string
+                    example: "2026-01"
+        "500":
+          description: "Internal Server Error"
+      x-amazon-apigateway-integration:
+        uri: "${KakuyasuTimelineFunctionArn}"
+        httpMethod: "POST"
+        type: "aws_proxy"
+        payloadFormatVersion: "2.0"
+
+  /upload-status:
+    get:
+      summary: "月間アップロード状況取得"
+      parameters:
+        - name: "month"
+          in: "query"
+          required: false
+          schema:
+            type: "string"
+            pattern: "^\\d{4}-\\d{2}$"
+            example: "2026-01"
+          description: "取得対象月 (YYYY-MM形式、省略時は当月)"
+      responses:
+        "200":
+          description: "OK"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  limit:
+                    type: integer
+                    description: "月間上限枚数"
+                  used:
+                    type: integer
+                    description: "使用済み枚数"
+                  remaining:
+                    type: integer
+                    description: "残り枚数"
+                  month:
+                    type: string
+                    description: "対象月"
+                  isLimitReached:
+                    type: boolean
+                    description: "上限到達フラグ"
+        "500":
+          description: "Internal Server Error"
       x-amazon-apigateway-integration:
         uri: "${KakuyasuTimelineFunctionArn}"
         httpMethod: "POST"

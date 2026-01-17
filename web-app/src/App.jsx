@@ -96,7 +96,14 @@ function App() {
   });
   const syncInProgressRef = useRef(false);
   const contentTextareaRef = useRef(null);
-  
+  const [uploadLimit, setUploadLimit] = useState({
+    limit: 50,
+    used: 0,
+    remaining: 50,
+    month: null
+  });
+  const [uploadLimitError, setUploadLimitError] = useState(null);
+
   const today = new Date();
   const [currentYear, setCurrentYear] = useState(today.getFullYear());
   const [currentMonth, setCurrentMonth] = useState(today.getMonth() + 1);
@@ -1158,8 +1165,42 @@ function App() {
         const processedBlob = await processImage(selectedImage);
         const { cipherBlob, saltB64, ivB64 } = await encryptBlobWithPin(pin, processedBlob);
         const uploadContentType = processedBlob.type || selectedImage.type || 'application/octet-stream';
-        const { uploadUrl, imageKey: key } = await getUploadUrl(selectedImage.name, uploadContentType);
+
+        let uploadResponse;
+        try {
+          uploadResponse = await getUploadUrl(selectedImage.name, uploadContentType);
+        } catch (uploadError) {
+          // 429エラー（アップロード上限超過）の特別処理
+          if (uploadError.status === 429) {
+            const errorData = uploadError.data || {};
+            setUploadLimitError(errorData.message || '月間アップロード上限に達しました');
+            alert(
+              `${errorData.message || '月間アップロード上限に達しました'}\n\n` +
+              `今月の利用状況: ${errorData.current || '?'}/${errorData.limit || 50}枚\n` +
+              `対象月: ${errorData.month || '現在の月'}`
+            );
+            setSyncState('idle');
+            return;
+          }
+          // その他のエラーはそのまま再スロー
+          throw uploadError;
+        }
+
+        const { uploadUrl, imageKey: key, uploadLimit: limitInfo } = uploadResponse;
+
+        // アップロード制限情報を更新
+        if (limitInfo) {
+          setUploadLimit({
+            limit: limitInfo.limit,
+            used: limitInfo.used,
+            remaining: limitInfo.remaining,
+            month: limitInfo.month
+          });
+          setUploadLimitError(null);
+        }
+
         await uploadFile(uploadUrl, cipherBlob, uploadContentType);
+
         draft.imageKey = key;
         draft.imageSalt = saltB64;
         draft.imageIv = ivB64;
@@ -1299,8 +1340,39 @@ function App() {
         const processedBlob = await processImage(selectedImage);
         const { cipherBlob, saltB64, ivB64 } = await encryptBlobWithPin(pin, processedBlob);
         const uploadContentType = processedBlob.type || selectedImage.type || 'application/octet-stream';
-        const { uploadUrl, imageKey: key } = await getUploadUrl(selectedImage.name, uploadContentType);
+
+        let uploadResponse;
+        try {
+          uploadResponse = await getUploadUrl(selectedImage.name, uploadContentType);
+        } catch (uploadError) {
+          if (uploadError.status === 429) {
+            const errorData = uploadError.data || {};
+            setUploadLimitError(errorData.message || '月間アップロード上限に達しました');
+            alert(
+              `${errorData.message || '月間アップロード上限に達しました'}\n\n` +
+              `今月の利用状況: ${errorData.current || '?'}/${errorData.limit || 50}枚\n` +
+              `対象月: ${errorData.month || '現在の月'}`
+            );
+            setIsChatSubmitting(false);
+            return;
+          }
+          throw uploadError;
+        }
+
+        const { uploadUrl, imageKey: key, uploadLimit: limitInfo } = uploadResponse;
+
+        if (limitInfo) {
+          setUploadLimit({
+            limit: limitInfo.limit,
+            used: limitInfo.used,
+            remaining: limitInfo.remaining,
+            month: limitInfo.month
+          });
+          setUploadLimitError(null);
+        }
+
         await uploadFile(uploadUrl, cipherBlob, uploadContentType);
+
         imageKey = key;
         imageUrl = URL.createObjectURL(processedBlob);
         imageSalt = saltB64;
@@ -2130,6 +2202,40 @@ function App() {
                         )}
                       </div>
                     </div>
+
+                    {uploadLimit.month && (
+                      <div className="upload-limit-info" style={{
+                        fontSize: '0.85rem',
+                        color: uploadLimit.remaining < 10 ? '#d32f2f' : '#666',
+                        marginBottom: '8px',
+                        padding: '8px',
+                        backgroundColor: uploadLimit.remaining < 10 ? '#ffebee' : '#f5f5f5',
+                        borderRadius: '4px',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center'
+                      }}>
+                        <span>
+                          今月のアップロード: {uploadLimit.used}/{uploadLimit.limit}枚
+                        </span>
+                        <span style={{ fontWeight: 'bold' }}>
+                          残り: {uploadLimit.remaining}枚
+                        </span>
+                      </div>
+                    )}
+
+                    {uploadLimitError && (
+                      <div className="upload-limit-error" style={{
+                        color: '#d32f2f',
+                        backgroundColor: '#ffebee',
+                        padding: '12px',
+                        borderRadius: '4px',
+                        marginBottom: '12px',
+                        fontSize: '0.9rem'
+                      }}>
+                        {uploadLimitError}
+                      </div>
+                    )}
 
                     {!formIsEvent && (
                       <div className="form-group">

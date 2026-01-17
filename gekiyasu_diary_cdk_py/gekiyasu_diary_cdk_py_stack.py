@@ -88,45 +88,7 @@ class GekiyasuDiaryCdkPyStack(Stack):
             ),
         )
 
-        # 4. API Gateway
-        openapi_path = os.path.join(os.path.dirname(__file__), "..", "openapi", "api-spec.yaml")
-        with open(openapi_path, 'r', encoding='utf-8') as f:
-            spec_content = f.read()
-
-        lambda_integration_uri = f"arn:aws:apigateway:{self.region}:lambda:path/2015-03-31/functions/{handler.function_arn}/invocations"
-
-        spec_content = spec_content.replace("${KakuyasuTimelineFunctionArn}", lambda_integration_uri)
-        spec_content = spec_content.replace("${ClientId}", user_pool_client.user_pool_client_id)
-        spec_content = spec_content.replace("${UserPoolId}", user_pool.user_pool_id)
-        spec_content = spec_content.replace("${Region}", self.region)
-        spec_dict = yaml.safe_load(spec_content)
-
-        spec_dict["x-amazon-apigateway-cors"] = {
-            "allowMethods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            "allowHeaders": ["*"],
-            "allowOrigins": ["*"],
-            "maxAge": 600
-        }
-
-        api = apigatewayv2.CfnApi(
-            self, "KakuyasuTimelineHttpApi",
-            body=spec_dict
-        )
-
-        apigatewayv2.CfnStage(
-            self, "ApiStage",
-            api_id=api.ref,
-            stage_name="$default",
-            auto_deploy=True
-        )
-
-        handler.add_permission(
-            "PermitAPIGatewayV2",
-            principal=iam.ServicePrincipal("apigateway.amazonaws.com"),
-            source_arn=f"arn:aws:execute-api:{self.region}:{self.account}:{api.ref}/*"
-        )
-
-        # 5. S3 & CloudFront
+        # 4. S3 & CloudFront
         website_bucket = s3.Bucket(
             self, "WebsiteBucket",
             removal_policy=RemovalPolicy.DESTROY,
@@ -158,6 +120,48 @@ class GekiyasuDiaryCdkPyStack(Stack):
                     ttl=Duration.seconds(0)
                 )
             ]
+        )
+
+        # 5. API Gateway
+        openapi_path = os.path.join(os.path.dirname(__file__), "..", "openapi", "api-spec.yaml")
+        with open(openapi_path, 'r', encoding='utf-8') as f:
+            spec_content = f.read()
+
+        lambda_integration_uri = f"arn:aws:apigateway:{self.region}:lambda:path/2015-03-31/functions/{handler.function_arn}/invocations"
+
+        spec_content = spec_content.replace("${KakuyasuTimelineFunctionArn}", lambda_integration_uri)
+        spec_content = spec_content.replace("${ClientId}", user_pool_client.user_pool_client_id)
+        spec_content = spec_content.replace("${UserPoolId}", user_pool.user_pool_id)
+        spec_content = spec_content.replace("${Region}", self.region)
+        spec_dict = yaml.safe_load(spec_content)
+
+        spec_dict["x-amazon-apigateway-cors"] = {
+            "allowMethods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allowHeaders": ["*"],
+            "allowOrigins": [Fn.join("", ["https://", distribution.distribution_domain_name])],
+            "maxAge": 600
+        }
+
+        api = apigatewayv2.CfnApi(
+            self, "KakuyasuTimelineHttpApi",
+            body=spec_dict
+        )
+
+        apigatewayv2.CfnStage(
+            self, "ApiStage",
+            api_id=api.ref,
+            stage_name="$default",
+            auto_deploy=True,
+            default_route_settings=apigatewayv2.CfnStage.RouteSettingsProperty(
+                throttling_burst_limit=30,
+                throttling_rate_limit=10
+            )
+        )
+
+        handler.add_permission(
+            "PermitAPIGatewayV2",
+            principal=iam.ServicePrincipal("apigateway.amazonaws.com"),
+            source_arn=f"arn:aws:execute-api:{self.region}:{self.account}:{api.ref}/*"
         )
 
         user_content_bucket.add_cors_rule(
