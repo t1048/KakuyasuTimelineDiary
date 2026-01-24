@@ -1,0 +1,55 @@
+name: Deploy to Cloudflare Pages
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy to Cloudflare Pages
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: web-app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web-app
+        run: npm ci
+
+      - name: Build application
+        working-directory: web-app
+        run: npm run build
+        env:
+          VITE_USER_POOL_ID: ${{ secrets.VITE_USER_POOL_ID }}
+          VITE_USER_POOL_CLIENT_ID: ${{ secrets.VITE_USER_POOL_CLIENT_ID }}
+          VITE_REGION: ${{ secrets.VITE_REGION }}
+          VITE_R2_DOMAIN: ${{ secrets.VITE_R2_DOMAIN }}
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy web-app/dist --project-name=kakuyasu-timeline-diary
+
+      - name: Run D1 migrations (on main branch only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: d1 execute kakuyasu-timeline-diary-db --remote --file=web-app/migrations/0001_initial_schema.sql
+        continue-on-error: true  # Migration may already exist

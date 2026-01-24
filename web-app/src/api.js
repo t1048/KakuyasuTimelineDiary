@@ -1,6 +1,7 @@
 import { fetchAuthSession } from 'aws-amplify/auth';
 
-const API_URL = import.meta.env.VITE_API_URL;
+// Cloudflare Pages Functions use same-origin routing (no separate API URL needed)
+const API_URL = import.meta.env.VITE_API_URL || '';
 
 const getHeaders = async () => {
   try {
