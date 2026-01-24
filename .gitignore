@@ -10,3 +10,4 @@ web-app/.env
 # CDK asset staging directory
 .cdk.staging
 cdk.out
+/web-app/wrangler.toml

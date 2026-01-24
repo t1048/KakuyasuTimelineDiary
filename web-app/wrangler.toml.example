@@ -1,0 +1,25 @@
+# Cloudflare Pages Configuration Template
+# Copy this file to wrangler.toml and fill in your values
+
+name = "kakuyasu-timeline-diary"
+compatibility_date = "2024-01-01"
+pages_build_output_dir = "dist"
+
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "YOUR_DATABASE_NAME"
+database_id = "YOUR_DATABASE_ID"
+
+# R2 Storage binding
+[[r2_buckets]]
+binding = "USER_CONTENT_BUCKET"
+bucket_name = "YOUR_BUCKET_NAME"
+
+# Environment variables
+[vars]
+AWS_REGION = "ap-northeast-1"
+USER_POOL_ID = "YOUR_USER_POOL_ID"
+USER_POOL_CLIENT_ID = "YOUR_USER_POOL_CLIENT_ID"
+CONSENT_VERSION = "2025-12-21"
+MONTHLY_IMAGE_UPLOAD_LIMIT = "50"
