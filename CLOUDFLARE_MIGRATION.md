@@ -10,6 +10,22 @@
 
 ## セットアップ手順
 
+### 0. AWS Cognito のデプロイ (事前準備)
+
+Cloudflare の設定に必要な Cognito 情報を取得するため、先に AWS CDK で認証基盤をデプロイします。
+
+```bash
+# 仮想環境の有効化 (Windows)
+. .venv\Scripts\Activate.ps1
+
+# CDK デプロイ
+cdk deploy
+```
+
+デプロイ完了後、ターミナルに表示される `Outputs` の値をメモしてください：
+- `GekiyasuDiaryCdkPyStack.UserPoolId`
+- `GekiyasuDiaryCdkPyStack.UserPoolClientId`
+
 ### 1. Wranglerのインストール
 
 ```bash
@@ -44,13 +60,13 @@ database_id = "ここにdatabase_idを貼り付け"
 
 ```bash
 # ローカル開発用
-npx wrangler d1 execute kakuyasu-timeline-diary-db \
-  --local \
+npx wrangler d1 execute kakuyasu-timeline-diary-db `
+  --local `
   --file=./migrations/0001_initial_schema.sql
 
 # 本番環境用
-npx wrangler d1 execute kakuyasu-timeline-diary-db \
-  --remote \
+npx wrangler d1 execute kakuyasu-timeline-diary-db `
+  --remote `
   --file=./migrations/0001_initial_schema.sql
 ```
 
@@ -62,13 +78,13 @@ npx wrangler r2 bucket create kakuyasu-timeline-user-content
 
 ### 6. 環境変数設定
 
-[wrangler.toml](web-app/wrangler.toml:19)を編集して、Cognito情報を設定します:
+[wrangler.toml](web-app/wrangler.toml:19)を編集して、ステップ0で取得したCognito情報を設定します:
 
 ```toml
 [vars]
 AWS_REGION = "ap-northeast-1"
-USER_POOL_ID = "ap-northeast-1_XXXXXXXXX"  # あなたのCognito User Pool ID
-USER_POOL_CLIENT_ID = "XXXXXXXXXXXXXXXXXXXXXXXXXX"  # あなたのCognito Client ID
+USER_POOL_ID = "ap-northeast-1_XXXXXXXXX"  # GekiyasuDiaryCdkPyStack.UserPoolId の値
+USER_POOL_CLIENT_ID = "XXXXXXXXXXXXXXXXXXXXXXXXXX"  # GekiyasuDiaryCdkPyStack.UserPoolClientId の値
 CONSENT_VERSION = "2025-12-21"
 MONTHLY_IMAGE_UPLOAD_LIMIT = "50"
 ```
@@ -81,7 +97,7 @@ MONTHLY_IMAGE_UPLOAD_LIMIT = "50"
 cp .env.example .env
 ```
 
-`.env`を編集:
+`.env`を編集し、ステップ0で取得した値を設定します:
 
 ```
 VITE_API_URL=
@@ -117,13 +133,22 @@ npx wrangler pages deploy dist --project-name=kakuyasu-timeline-diary
 
 ### 10. R2公開URL設定（オプション）
 
-R2バケットの公開URLを取得:
+R2バケットのマネージド公開URL (`r2.dev`) を有効にします：
+
+1. Cloudflareダッシュボードで **R2** > **kakuyasu-timeline-user-content** を選択します。
+2. **Settings** タブを開き、**Public Bucket UI** セクションを探します。
+3. **Allow Access** をクリックし、確認画面で `Confirm` 等を入力して有効化します。
+4. 発行されたURL（例: `https://pub-xxxx.r2.dev`）をコピーします。
+
+`.env`の`VITE_R2_DOMAIN`にこのURLを設定して再デプロイします：
 
 ```bash
-npx wrangler r2 bucket domain add kakuyasu-timeline-user-content --domain pub-XXXX.r2.dev
-```
+# ビルド
+npm run build
 
-`.env`の`VITE_R2_DOMAIN`にこのURLを設定して再デプロイします。
+# 再デプロイ
+npx wrangler pages deploy dist --project-name=kakuyasu-timeline-diary
+```
 
 ---
 

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Amplify } from 'aws-amplify';
 import { useAuthenticator } from '@aws-amplify/ui-react';
 import '@aws-amplify/ui-react/styles.css';
-import { getItems, createItem, deleteItem, getConsent, setConsent, getTemplates, saveTemplate, deleteTemplate, generateRecurringInstancesForDate, getOutbox, enqueueOutboxEntry, removeOutboxEntry, updateOutboxEntry, getUploadUrl, uploadFile } from './api';
+import { getItems, createItem, deleteItem, getConsent, setConsent, getTemplates, saveTemplate, deleteTemplate, generateRecurringInstancesForDate, getOutbox, enqueueOutboxEntry, removeOutboxEntry, updateOutboxEntry, getUploadUrl, uploadFile, fetchFile } from './api';
 import { Calendar, Clock, Trash2, Plus, X, LogOut, FileText, ChevronLeft, ChevronRight, KeyRound, AlertCircle, List, Settings, Pencil, Hash, CalendarDays, Camera, Send } from 'lucide-react';
 import './App.css';
 
@@ -543,7 +543,7 @@ function App() {
             let imageUrl = item.imageUrl;
             if (item.imageKey && item.imageUrl && item.imageSalt && item.imageIv) {
               try {
-                const res = await fetch(item.imageUrl, { mode: 'cors' });
+                const res = await fetchFile(item.imageUrl);
                 if (res.ok) {
                   const buffer = await res.arrayBuffer();
                   const decryptedBlob = await decryptArrayBufferWithPin(pin, item.imageSalt, item.imageIv, buffer);

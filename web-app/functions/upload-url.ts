@@ -11,7 +11,10 @@ interface Env {
 interface Context {
   request: Request;
   env: Env;
-  user_id: string;
+  data?: {
+    user_id?: string;
+    [key: string]: any;
+  };
 }
 
 interface UploadRequest {
@@ -28,7 +31,15 @@ const ALLOWED_CONTENT_TYPES = [
 
 // POST /upload-url
 export async function onRequestPost(context: Context): Promise<Response> {
-  const { request, env, user_id } = context;
+  const { request, env } = context;
+  const user_id = context.data?.user_id;
+
+  if (!user_id) {
+    return Response.json({
+      error: 'Unauthorized',
+      message: 'Missing user id'
+    }, { status: 401 });
+  }
 
   try {
     const body = await request.json() as UploadRequest;

@@ -57,3 +57,41 @@ export async function onRequestPut(context: Context): Promise<Response> {
     }, { status: 500 });
   }
 }
+
+// GET /api/upload/:key
+export async function onRequestGet(context: Context): Promise<Response> {
+  const { env, params } = context;
+
+  try {
+    const imageKey = decodeURIComponent(params.key);
+
+    if (!imageKey.startsWith('users/')) {
+      return Response.json({
+        error: 'Invalid image key'
+      }, { status: 400 });
+    }
+
+    const object = await env.USER_CONTENT_BUCKET.get(imageKey);
+
+    if (!object) {
+      return Response.json({
+        error: 'Image not found'
+      }, { status: 404 });
+    }
+
+    const headers = new Headers();
+    object.writeHttpMetadata(headers);
+    headers.set('etag', object.httpEtag);
+    headers.set('Cache-Control', 'public, max-age=31104000'); // 1 year cache
+
+    return new Response(object.body, {
+      headers
+    });
+
+  } catch (error) {
+    console.error('Error fetching from R2:', error);
+    return Response.json({
+      error: 'Failed to fetch from R2'
+    }, { status: 500 });
+  }
+}

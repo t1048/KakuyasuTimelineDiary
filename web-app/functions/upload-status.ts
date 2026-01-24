@@ -10,7 +10,10 @@ interface Env {
 interface Context {
   request: Request;
   env: Env;
-  user_id: string;
+  data?: {
+    user_id?: string;
+    [key: string]: any;
+  };
 }
 
 interface MonthlyUpload {
@@ -24,8 +27,16 @@ interface MonthlyUpload {
 
 // GET /upload-status
 export async function onRequestGet(context: Context): Promise<Response> {
-  const { request, env, user_id } = context;
+  const { request, env } = context;
+  const user_id = context.data?.user_id;
   const url = new URL(request.url);
+
+  if (!user_id) {
+    return Response.json({
+      error: 'Unauthorized',
+      message: 'Missing user id'
+    }, { status: 401 });
+  }
 
   try {
     // Get month from query parameter or use current month

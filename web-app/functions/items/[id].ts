@@ -9,7 +9,10 @@ interface Env {
 interface Context {
   request: Request;
   env: Env;
-  user_id: string;
+  data?: {
+    user_id?: string;
+    [key: string]: any;
+  };
   params: {
     id: string;
   };
@@ -27,8 +30,16 @@ interface DiaryRecord {
 
 // DELETE /items/:id
 export async function onRequestDelete(context: Context): Promise<Response> {
-  const { request, env, user_id, params } = context;
+  const { request, env, params } = context;
+  const user_id = context.data?.user_id;
   const url = new URL(request.url);
+
+  if (!user_id) {
+    return Response.json({
+      error: 'Unauthorized',
+      message: 'Missing user id'
+    }, { status: 401 });
+  }
 
   const itemId = params.id;
   const date = url.searchParams.get('date');

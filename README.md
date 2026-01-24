@@ -1,170 +1,341 @@
-# 激安日記アプリ（AWS CDK / Python）
+# 激安日記アプリ（Cloudflare + AWS Cognito）
 
-個人向けの「日記 + 予定」アプリです。AWSへ **低コスト** でデプロイして運用できます。
+個人向けの「日記 + 予定」アプリです。**完全無料枠内**で運用できます。
 
-- バックエンド：API Gateway + Lambda（Python）+ DynamoDB
-- 認証：Cognito User Pool（※セルフサインアップ無効／管理者作成のみ）
-- フロント：Vite + React（S3 + CloudFront 配信）
+## 🚀 アーキテクチャ
+
+### フロントエンド・バックエンド
+- **Cloudflare Pages**: フロントエンド（React + Vite）+ API（TypeScript Functions）
+- **Cloudflare D1**: データベース（SQLite）
+- **Cloudflare R2**: 画像ストレージ
+
+### 認証
+- **AWS Cognito User Pool**: ユーザー認証（※セルフサインアップ無効／管理者作成のみ）
+
+---
 
 ## 💰 コスト比較
 
-| コンポーネント | サーバーレス（本プロジェクト） | EC2 + VPC + RDS |
+| アーキテクチャ | 月額コスト（個人利用） | 備考 |
 |---|---|---|
-| **コンピュート** | Lambda：$0.20/100万リクエスト | EC2（t3.micro）：$7.50/月（常時稼働） |
-| **データベース** | DynamoDB：$1.25/GB（オンデマンド） | RDS（db.t3.micro）：$20-30/月 |
-| **ネットワーク** | API Gateway：$3.50/100万リクエスト | 別途 NAT ゲートウェイ費用 |
-| **ストレージ** | S3 + CloudFront：$0.50/GB（転送） | EBS：$0.10/GB/月 |
-| **想定月額（低利用）** | **$1-5/月** | **$30-50/月** |
-| **想定月額（中程度利用）** | **$10-20/月** | **$30-50/月** |
+| **Cloudflare（本プロジェクト）** | **$0/月** | Pages, D1, R2すべて無料枠内 |
+| **従来のAWSサーバーレス** | $1-20/月 | Lambda + DynamoDB + S3 + CloudFront |
+| **EC2 + RDS** | $30-50/月 | 常時稼働のサーバー費用 |
 
-✅ **サーバーレスが **10～50倍安い** です！**
+### ✅ Cloudflare無料枠の詳細
 
-### 📊 アーキテクチャ移行の目安
+| サービス | 無料枠 | 個人利用の目安 |
+|---|---|---|
+| **Pages** | 500ビルド/月 | 毎日デプロイしても余裕 |
+| **D1** | 5GB、500万読み取り/日 | 数年分の日記データを保存可能 |
+| **R2** | 10GB、1,000万読み取り/月 | 画像数千枚を保存可能 |
+| **Cognito** | MAU 50,000まで無料 | 個人・小規模利用は完全無料 |
 
-以下のような規模に成長した場合、**EC2 + RDS への移行** を検討してください：
-
-- **ユーザー数：100人以上**
-- **月間 API リクエスト数：1,000万リクエスト以上**
-- **データベース容量：10GB以上**
-- **同時接続数：500以上**
-
-この規模では、EC2 + RDS のほうが **スケーラビリティ・運用効率** で優位になる場合があります。  
-ただし、本プロジェクトは **個人～小規模チーム向け** のため、現在のサーバーレス構成がお勧めです。
+**結論: 個人利用なら完全無料で運用可能！** 🎉
 
 ---
 
-## 📌 まずはこちら（詳しいデプロイ手順）
+## 📌 デプロイ手順
 
-デプロイ手順の詳細は `デプロイ手順書.md` にまとめています。
+### クイックスタート
 
-- [デプロイ手順書.md](./デプロイ手順書.md)
+1. **Cloudflareへの移行**: [CLOUDFLARE_MIGRATION.md](./CLOUDFLARE_MIGRATION.md) を参照
+2. **AWS Cognito設定**: 本READMEの「Cognito設定」セクション
 
-この README では、**誰でもデプロイできるように**「AWS側の準備」「ローカルのインストール」「認証設定」までを案内します。
+詳細な手順は以下のドキュメントをご覧ください：
+
+- **Cloudflare移行ガイド**: [CLOUDFLARE_MIGRATION.md](./CLOUDFLARE_MIGRATION.md)
+- **従来のデプロイ手順** (参考): [デプロイ手順書.md](./デプロイ手順書.md)
 
 ---
 
-## ✅ 前提
+## ✅ 前提条件
 
-- AWSアカウントを作成できること（クレジットカード登録が必要です）
-- ローカルPCでコマンド実行できること（macOS / Windows / Linux）
+### 必須
+- **Cloudflareアカウント**（無料プラン）
+- **AWSアカウント**（Cognito用のみ）
+- Node.js 18以降
+- Git
 
-## 0) このリポジトリを取得
+### ローカル開発用（オプション）
+- AWS CLI（Cognito管理用）
+- Python 3.11（AWS CDK用）
 
-このプロジェクト（`gekiyasu-diary-cdk-py`）をローカルに配置してください（Git clone / ZIP ダウンロード等）。
+---
 
-## 1) AWSアカウント作成
+## 🔧 セットアップ手順
 
-まだの場合は AWS アカウントを作成してください。
+### 1. リポジトリのクローン
 
-- https://aws.amazon.com/jp/ （「アカウントを作成」）
-
-作成後、**請求アラート（Budgets）** の設定を推奨します（想定外の課金防止）。
-
-## 2) CDKデプロイ用 IAM ユーザー（またはロール）作成
-
-最短で進めるため、ここでは IAM ユーザー + アクセスキーでの手順を記載します。
-
-1. AWSコンソール → IAM → ユーザー → 「ユーザーを追加」
-2. アクセスキーを発行（AWSコンソールの案内に従って作成）
-3. 権限は以下いずれかを付与
-   - 簡単に進める：`AdministratorAccess`（個人検証用途向け）
-   - 運用で厳密にする：最小権限ポリシーを用意（※本READMEでは割愛）
-4. 発行された `Access key ID` / `Secret access key` を控える
-
-> 可能であれば MFA 有効化、不要になったキーの削除も推奨です。
-
-## 3) ローカル環境のインストール
-
-以下が必要です。
-
-- AWS CLI（`aws --version`）
-- Node.js（CDK CLI / フロントビルド用）
-- Python（CDKアプリ実行用。本プロジェクトは `python3.11` を使用）
-- AWS CDK CLI（`cdk --version`）
-
-### AWS CLI
-
-- 公式手順：https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
-
-### Node.js
-
-- 公式：https://nodejs.org/ （LTS推奨）
-
-### Python
-
-- 公式：https://www.python.org/downloads/
-
-### AWS CDK CLI（グローバルインストール）
-
-```
-npm install -g aws-cdk
-cdk --version
+```bash
+git clone <このリポジトリのURL>
+cd KakuyasuTimelineDiary
 ```
 
-## 4) AWS認証情報の設定（`aws configure`）
+### 2. Cloudflare Pagesへのデプロイ
 
-作成した IAM ユーザーのアクセスキーをローカルに設定します。
+詳細は [CLOUDFLARE_MIGRATION.md](./CLOUDFLARE_MIGRATION.md) を参照してください。
 
+**概要**:
+
+```bash
+cd web-app
+
+# 1. 依存関係インストール
+npm install
+
+# 2. Wranglerでログイン
+npx wrangler login
+
+# 3. D1データベース作成
+npx wrangler d1 create kakuyasu-timeline-diary-db
+
+# 4. R2バケット作成
+npx wrangler r2 bucket create kakuyasu-timeline-user-content
+
+# 5. 環境変数設定（wrangler.tomlを編集）
+
+# 6. D1マイグレーション
+npx wrangler d1 execute kakuyasu-timeline-diary-db \
+  --remote \
+  --file=./migrations/0001_initial_schema.sql
+
+# 7. ビルド＆デプロイ
+npm run build
+npx wrangler pages deploy dist --project-name=kakuyasu-timeline-diary
 ```
-aws configure
-```
 
-入力例：
+### 3. AWS Cognito設定
 
-- AWS Access Key ID: （控えた値）
-- AWS Secret Access Key: （控えた値）
-- Default region name: `ap-northeast-1`（例）
-- Default output format: `json`
+Cognitoはユーザー認証専用で使用します。
 
-設定できたか確認：
+#### 3.1 AWS CDKでCognitoをデプロイ
 
-```
-aws sts get-caller-identity
-```
+```bash
+# リポジトリルートで実行
 
-アカウントIDの確認（`cdk bootstrap aws://ACCOUNT_ID/REGION` で使います）：
+# Python仮想環境作成
+python3 -m venv .venv
+source .venv/bin/activate  # Windows: .\.venv\Scripts\activate
 
-```
-aws sts get-caller-identity --query Account --output text
-```
-
-> 複数アカウント/複数ユーザーを使い分けたい場合は、`AWS_PROFILE` を使う運用が便利です（例：`AWS_PROFILE=your-profile cdk deploy`）。
-
-## 5) CDK（Python）依存関係のセットアップ
-
-```
-cd gekiyasu-diary-cdk-py
-python3 -m venv .venv  # Windows は `python -m venv .venv`
-source .venv/bin/activate  # Windows は `.\.venv\Scripts\activate`
+# 依存関係インストール
 pip install -r requirements.txt
+
+# Bootstrapアカウント（初回のみ）
+cdk bootstrap aws://YOUR_ACCOUNT_ID/ap-northeast-1
+
+# Cognitoスタックをデプロイ
+cdk deploy
 ```
 
-## 6) デプロイ（初回は bootstrap が必要）
+デプロイ後、以下の情報が出力されます：
+- `UserPoolId`
+- `UserPoolClientId`
+- `Region`
 
-以降の流れは `デプロイ手順書.md` に沿って実施してください。
+#### 3.2 環境変数の設定
 
-- [デプロイ手順書.md](./デプロイ手順書.md)
+上記の値を `web-app/wrangler.toml` に設定：
 
-ポイントだけ抜粋すると以下です。
+```toml
+[vars]
+AWS_REGION = "ap-northeast-1"
+USER_POOL_ID = "ap-northeast-1_XXXXXXXXX"
+USER_POOL_CLIENT_ID = "XXXXXXXXXXXXXXXXXXXXXXXXXX"
+```
 
-1. `cdk bootstrap`（アカウント/リージョンごとに一度だけ）
-2. `cdk deploy`（1回目）→ Outputs から `ApiUrl` / `UserPoolId` / `UserPoolClientId` を取得
-3. `web-app/.env.example` を `web-app/.env` にコピーして `VITE_API_URL` / `VITE_USER_POOL_ID` / `VITE_USER_POOL_CLIENT_ID` を設定
-4. `web-app` を `npm run build`
-5. `cdk deploy`（2回目）→ `CloudFrontUrl` でアクセス
+再デプロイ：
 
-## 注意事項
+```bash
+cd web-app
+npm run build
+npx wrangler pages deploy dist --project-name=kakuyasu-timeline-diary
+```
 
-- `cdk destroy` はリソース削除により **保存データも消える** 可能性があります（テーブル等が `DESTROY` 設定）。
-- Cognito はセルフサインアップ無効のため、初回は管理者がユーザー作成してください（手順は `デプロイ手順書.md` に記載）。
+#### 3.3 ユーザー作成
+
+Cognitoはセルフサインアップ無効のため、管理者が手動でユーザーを作成します。
+
+**AWS CLIの場合**:
+
+```bash
+aws cognito-idp admin-create-user \
+  --user-pool-id ap-northeast-1_XXXXXXXXX \
+  --username user@example.com \
+  --user-attributes Name=email,Value=user@example.com \
+  --region ap-northeast-1
+```
+
+**AWSコンソールの場合**:
+1. Cognito → User Pools → kakuyasu-timeline-diary-user-pool
+2. Users → Create user
+3. メールアドレスを入力
+4. 一時パスワードが自動生成される
+
+初回ログイン時に、ユーザーはパスワードを変更するよう求められます。
+
+---
+
+## 🏗️ プロジェクト構成
+
+```
+KakuyasuTimelineDiary/
+├── web-app/                      # フロントエンド + Cloudflare Functions
+│   ├── src/                      # Reactアプリ
+│   ├── functions/                # Cloudflare Pages Functions (TypeScript)
+│   │   ├── _middleware.ts        # JWT認証ミドルウェア
+│   │   ├── items.ts              # 日記CRUD API
+│   │   ├── consent.ts            # 同意管理API
+│   │   ├── upload-url.ts         # 画像アップロードAPI
+│   │   └── api/upload/[key].ts   # R2アップロードプロキシ
+│   ├── migrations/               # D1データベースマイグレーション
+│   │   └── 0001_initial_schema.sql
+│   ├── wrangler.toml             # Cloudflare設定
+│   └── package.json
+├── gekiyasu_diary_cdk_py/        # AWS CDK (Cognito専用)
+│   └── gekiyasu_diary_cdk_py_stack.py
+├── app.py                        # CDKエントリーポイント
+├── requirements.txt              # Python依存関係
+├── CLOUDFLARE_MIGRATION.md       # Cloudflare移行ガイド
+└── README.md                     # このファイル
+```
+
+---
+
+## 🔐 セキュリティ
+
+- **認証**: AWS Cognito JWT
+- **暗号化**: クライアント側AES-GCM（4桁PIN）
+- **CORS**: 適切に設定済み
+- **アップロード制限**: 月間50枚/ユーザー
+
+---
+
+## 📊 機能
+
+- ✅ 日記の作成・編集・削除
+- ✅ 予定・イベントの管理
+- ✅ 画像アップロード（暗号化）
+- ✅ タグ機能
+- ✅ 複数日にまたがるイベント
+- ✅ オフライン同期キュー
+- ✅ テンプレート機能
+- ✅ 定期予定機能
+
+---
+
+## 🛠️ 開発
+
+### ローカル開発
+
+```bash
+cd web-app
+
+# D1ローカルマイグレーション
+npx wrangler d1 execute kakuyasu-timeline-diary-db \
+  --local \
+  --file=./migrations/0001_initial_schema.sql
+
+# ローカルサーバー起動
+npm run build
+npx wrangler pages dev dist --live-reload
+```
+
+ブラウザで `http://localhost:8788` を開きます。
+
+### CI/CD
+
+GitHub Actionsで自動デプロイ設定済み（`.github/workflows/deploy.yml`）。
+
+必要なシークレット：
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+- `VITE_USER_POOL_ID`
+- `VITE_USER_POOL_CLIENT_ID`
+
+---
+
+## 📝 移行履歴
+
+このプロジェクトは以下の順で進化しました：
+
+1. **v1.0**: AWS完全サーバーレス（Lambda + DynamoDB + S3 + CloudFront）
+2. **v2.0**: Cloudflare移行（Pages + D1 + R2）
+3. **v2.1**: AWS CDK簡素化（Cognito専用スタック）
+
+コスト削減効果：**月額$1-20 → $0**
+
+詳細は [CLOUDFLARE_MIGRATION.md](./CLOUDFLARE_MIGRATION.md) をご覧ください。
+
+---
+
+## 🗑️ リソースの削除
+
+### Cloudflareリソース
+
+```bash
+# Pagesプロジェクト削除（Cloudflareダッシュボードから手動）
+# D1データベース削除
+npx wrangler d1 delete kakuyasu-timeline-diary-db
+
+# R2バケット削除
+npx wrangler r2 bucket delete kakuyasu-timeline-user-content
+```
+
+### AWS Cognito削除
+
+```bash
+cdk destroy
+```
+
+**警告**: `cdk destroy`を実行すると、すべてのユーザーデータが削除されます。
+
+---
+
+## 🐛 トラブルシューティング
+
+### JWT認証エラー
+
+- `wrangler.toml`の`USER_POOL_ID`と`USER_POOL_CLIENT_ID`を確認
+- Cognitoのアプリクライアント設定を確認
+
+### R2アップロードエラー
+
+```bash
+# R2バケットが存在するか確認
+npx wrangler r2 bucket list
+```
+
+### D1マイグレーションエラー
+
+```bash
+# テーブルが既に存在する場合は無視してOK
+npx wrangler d1 execute kakuyasu-timeline-diary-db \
+  --remote \
+  --command "SELECT name FROM sqlite_master WHERE type='table';"
+```
+
+---
+
+## 📚 参考リンク
+
+- [Cloudflare Pages Docs](https://developers.cloudflare.com/pages/)
+- [Cloudflare D1 Docs](https://developers.cloudflare.com/d1/)
+- [Cloudflare R2 Docs](https://developers.cloudflare.com/r2/)
+- [AWS Cognito Docs](https://docs.aws.amazon.com/cognito/)
+- [AWS CDK Docs](https://docs.aws.amazon.com/cdk/)
 
 ---
 
 ## ☕ サポート
-このアプリが気に入っていただけたら、ぜひサポートをお願いします！  
-いただいたご支援は、制作者の糧となり活力になります。
 
+このアプリが気に入っていただけたら、ぜひサポートをお願いします！
+いただいたご支援は、制作者の糧となり活力になります。
 
 [![Support on Ko-fi](https://img.shields.io/badge/Support%20on%20Ko--fi-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/t1048)
 
 ---
+
+## 📄 ライセンス
+
+このプロジェクトは個人利用・学習目的でご自由にお使いください。

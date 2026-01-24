@@ -17,12 +17,39 @@ interface Context {
   request: Request;
   env: Env;
   next: () => Promise<Response>;
-  user_id?: string;
+  data?: {
+    user_id?: string;
+    [key: string]: any;
+  };
   params?: Record<string, string>;
 }
 
 export async function onRequest(context: Context): Promise<Response> {
   const { request, env, next } = context;
+  const url = new URL(request.url);
+
+  // API以外の静的ファイル（HTML, JS, CSS, 画像など）へのリクエストは認証をスキップする
+  const isApiRequest = 
+    url.pathname === '/consent' || 
+    url.pathname.startsWith('/items') || 
+    url.pathname === '/upload-url' || 
+    url.pathname === '/upload-status' ||
+    url.pathname.startsWith('/api/');
+
+  if (!isApiRequest) {
+    return next();
+  }
+
+  // Validate environment variables
+  if (!env.AWS_REGION || !env.USER_POOL_ID || !env.USER_POOL_CLIENT_ID) {
+    return new Response(JSON.stringify({ 
+      error: 'Configuration error', 
+      message: 'Backend environment variables (AWS_REGION, USER_POOL_ID, etc.) are not set.' 
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
 
   // Handle CORS preflight requests
   if (request.method === 'OPTIONS') {
@@ -63,8 +90,15 @@ export async function onRequest(context: Context): Promise<Response> {
       issuer: `https://cognito-idp.${env.AWS_REGION}.amazonaws.com/${env.USER_POOL_ID}`
     });
 
-    // Attach user_id to context for downstream functions
-    context.user_id = payload.sub as string;
+    if (!payload.sub) {
+      throw new Error('Token payload is missing "sub" claim');
+    }
+
+    // Attach user_id to context data for downstream functions
+    context.data = {
+      ...(context.data || {}),
+      user_id: payload.sub as string
+    };
 
     // Continue to the next middleware or handler
     const response = await next();

@@ -6,7 +6,11 @@ const API_URL = import.meta.env.VITE_API_URL || '';
 const getHeaders = async () => {
   try {
     const session = await fetchAuthSession();
-    const token = session.tokens.idToken.toString(); 
+    const token = session.tokens?.idToken?.toString(); 
+    if (!token) {
+      console.warn("No ID token found in session");
+      return { 'Content-Type': 'application/json' };
+    }
     return {
       'Content-Type': 'application/json',
       'Authorization': token
@@ -61,7 +65,10 @@ export const deleteItem = async ({ itemId, date, startDate, endDate }) => {
 export const getConsent = async () => {
   const headers = await getHeaders();
   const res = await fetch(`${API_URL}/consent`, { headers });
-  if (!res.ok) throw new Error('Failed to fetch consent');
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.message || errorData.error || 'Failed to fetch consent');
+  }
   return res.json();
 };
 
@@ -72,7 +79,10 @@ export const setConsent = async ({ agreed, version }) => {
     headers: headers,
     body: JSON.stringify({ agreed, version }),
   });
-  if (!res.ok) throw new Error('Failed to save consent');
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.message || errorData.error || 'Failed to save consent');
+  }
   return res.json();
 };
 
@@ -103,8 +113,10 @@ export const getUploadUrl = async (fileName, contentType) => {
 };
 
 export const uploadFile = async (url, file, contentType, extraHeaders = {}) => {
+  const authHeaders = await getHeaders();
   const headers = {
     'Content-Type': contentType,
+    ...authHeaders,
     ...extraHeaders
   };
 
@@ -130,6 +142,14 @@ export const uploadFile = async (url, file, contentType, extraHeaders = {}) => {
     console.error('Network error while uploading file:', err);
     throw err;
   }
+};
+
+// ファイル取得（認証ヘッダ付き）
+export const fetchFile = async (url) => {
+  const headers = await getHeaders();
+  const res = await fetch(url, { headers });
+  if (!res.ok) throw new Error(`Failed to fetch file: ${res.status}`);
+  return res;
 };
 
 export const getUploadStatus = async (month = null) => {

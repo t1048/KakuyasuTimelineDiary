@@ -11,7 +11,10 @@ interface Env {
 interface Context {
   request: Request;
   env: Env;
-  user_id: string;
+  data?: {
+    user_id?: string;
+    [key: string]: any;
+  };
 }
 
 interface DiaryRecord {
@@ -26,8 +29,16 @@ interface DiaryRecord {
 
 // GET /items?year=2025&month=01
 export async function onRequestGet(context: Context): Promise<Response> {
-  const { request, env, user_id } = context;
+  const { request, env } = context;
+  const user_id = context.data?.user_id;
   const url = new URL(request.url);
+
+  if (!user_id) {
+    return Response.json({
+      error: 'Unauthorized',
+      message: 'Missing user id'
+    }, { status: 401 });
+  }
 
   // Get year and month from query params or use current date
   const now = new Date();
@@ -50,10 +61,8 @@ export async function onRequestGet(context: Context): Promise<Response> {
       // Add image URLs for items with imageKey
       for (const item of orderedItems) {
         if (item.imageKey) {
-          // Use R2 public URL (bucket needs to be configured with public access)
-          // Format: https://pub-<hash>.r2.dev/<imageKey>
-          // Or use custom domain if configured
-          item.imageUrl = `https://pub-${env.USER_CONTENT_BUCKET.name || 'placeholder'}.r2.dev/${item.imageKey}`;
+          // Use authenticated proxy endpoint
+          item.imageUrl = `/api/upload/${encodeURIComponent(item.imageKey)}`;
         }
       }
 
@@ -76,7 +85,15 @@ export async function onRequestGet(context: Context): Promise<Response> {
 
 // POST /items
 export async function onRequestPost(context: Context): Promise<Response> {
-  const { request, env, user_id } = context;
+  const { request, env } = context;
+  const user_id = context.data?.user_id;
+
+  if (!user_id) {
+    return Response.json({
+      error: 'Unauthorized',
+      message: 'Missing user id'
+    }, { status: 401 });
+  }
 
   try {
     const body = await request.json() as any;
