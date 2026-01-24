@@ -41,19 +41,25 @@ npx wrangler login
 
 ブラウザでCloudflareへログインし、認証を完了します。
 
-### 3. D1データベース作成
+### 3. D1データベース作成（本番/開発を分離）
 
 ```bash
 npx wrangler d1 create kakuyasu-timeline-diary-db
+npx wrangler d1 create kakuyasu-timeline-diary-db-preview
 ```
 
-出力された`database_id`をコピーして、[wrangler.toml](web-app/wrangler.toml:11)の`database_id`フィールドに貼り付けます。
+出力された`database_id`をコピーして、[wrangler.toml](web-app/wrangler.toml:11)と[wrangler.toml](web-app/wrangler.toml:55)の`database_id`フィールドに貼り付けます。
 
 ```toml
 [[d1_databases]]
 binding = "DB"
 database_name = "kakuyasu-timeline-diary-db"
 database_id = "ここにdatabase_idを貼り付け"
+
+[[env.preview.d1_databases]]
+binding = "DB"
+database_name = "kakuyasu-timeline-diary-db-preview"
+database_id = "ここにpreviewのdatabase_idを貼り付け"
 ```
 
 ### 4. D1マイグレーション実行
@@ -70,10 +76,11 @@ npx wrangler d1 execute kakuyasu-timeline-diary-db `
   --file=./migrations/0001_initial_schema.sql
 ```
 
-### 5. R2バケット作成
+### 5. R2バケット作成（本番/開発を分離）
 
 ```bash
 npx wrangler r2 bucket create kakuyasu-timeline-user-content
+npx wrangler r2 bucket create kakuyasu-timeline-user-content-preview
 ```
 
 ### 6. 環境変数設定
@@ -104,7 +111,7 @@ VITE_API_URL=
 VITE_USER_POOL_ID=ap-northeast-1_XXXXXXXXX
 VITE_USER_POOL_CLIENT_ID=XXXXXXXXXXXXXXXXXXXXXXXXXX
 VITE_REGION=ap-northeast-1
-VITE_R2_DOMAIN=
+VITE_R2_DOMAIN=  # /api/upload/:key 経由で配信する場合は未設定でOK
 ```
 
 ### 8. ローカルテスト
@@ -131,16 +138,19 @@ npx wrangler pages deploy dist --project-name=kakuyasu-timeline-diary
 
 デプロイが完了すると、CloudflareからURLが発行されます（例: `https://kakuyasu-timeline-diary.pages.dev`）。
 
-### 10. R2公開URL設定（オプション）
+### 10. R2公開URL設定（非推奨、必要な場合のみ）
 
-R2バケットのマネージド公開URL (`r2.dev`) を有効にします：
+原則として、R2バケットは**非公開**のままにし、画像配信は`/api/upload/:key`経由で行います。
+公開URLを使うと、認証なしの大量アクセスでR2のリクエスト課金が膨らむ可能性があります。
+
+それでも公開URLが必要な場合のみ、R2バケットのマネージド公開URL (`r2.dev`) を有効にします：
 
 1. Cloudflareダッシュボードで **R2** > **kakuyasu-timeline-user-content** を選択します。
 2. **Settings** タブを開き、**Public Bucket UI** セクションを探します。
 3. **Allow Access** をクリックし、確認画面で `Confirm` 等を入力して有効化します。
 4. 発行されたURL（例: `https://pub-xxxx.r2.dev`）をコピーします。
 
-`.env`の`VITE_R2_DOMAIN`にこのURLを設定して再デプロイします：
+`.env`の`VITE_R2_DOMAIN`にこのURLを設定して再デプロイします（不要なら未設定でOK）：
 
 ```bash
 # ビルド
@@ -159,7 +169,7 @@ npx wrangler pages deploy dist --project-name=kakuyasu-timeline-diary
 GitHub リポジトリの Settings > Secrets and variables > Actions で以下を設定:
 
 - `CLOUDFLARE_API_TOKEN`: Cloudflareダッシュボードから取得（My Profile > API Tokens > Create Token）
-  - Permissions: `Account.Cloudflare Pages:Edit`, `Account.D1:Edit`
+  - Permissions: `Account.Cloudflare Pages:Edit`, `Account.D1:Edit`（必要最小限）
 - `CLOUDFLARE_ACCOUNT_ID`: Cloudflareダッシュボードの右サイドバーに表示
 - `VITE_USER_POOL_ID`: AWS Cognito User Pool ID
 - `VITE_USER_POOL_CLIENT_ID`: AWS Cognito Client ID
@@ -167,6 +177,28 @@ GitHub リポジトリの Settings > Secrets and variables > Actions で以下�
 - `VITE_R2_DOMAIN`: R2公開ドメイン（オプション）
 
 設定後、`main`ブランチへのpushで自動デプロイされます。
+
+---
+
+## セキュリティ/コスト防御（Cloudflare設定）
+
+### Rate Limiting（必須）
+Cloudflare Dashboardでルールを追加し、**過剰アクセスによる課金**を抑制します。
+例:
+- `/upload-url` (POST): 1ユーザー/1分あたり数回程度に制限
+- `/api/upload/*` (PUT/GET): 1ユーザー/1分あたり数十回程度に制限
+- `/items*` (GET/POST/PUT/DELETE): 1ユーザー/1分あたり数十回程度に制限
+
+### WAF / Bot対策（推奨）
+- Managed Rules を有効化
+- Bot Fight Mode を有効化（プランに応じて）
+- 疑わしい国/ASN/UAのブロックは運用に合わせて追加
+
+### Billing/Usage アラート（必須）
+Cloudflare Dashboardの通知設定で以下のアラートを有効化:
+- R2: リクエスト数、ストレージ使用量
+- D1: 読み取り/書き込み回数
+- Pages: ビルド回数
 
 ---
 

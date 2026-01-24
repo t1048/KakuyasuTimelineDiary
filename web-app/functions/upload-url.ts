@@ -1,10 +1,13 @@
 // Upload URL Endpoint
 // POST /upload-url - Generate upload URL for images (Worker proxy pattern)
 
+import { createUploadSignature } from './_utils';
+
 interface Env {
   DB: any;
   USER_CONTENT_BUCKET: any;
   MONTHLY_IMAGE_UPLOAD_LIMIT: string;
+  SIGNING_KEY: string;
   [key: string]: any;
 }
 
@@ -28,6 +31,7 @@ const ALLOWED_CONTENT_TYPES = [
   'image/png',
   'image/webp'
 ];
+const UPLOAD_URL_TTL_SECONDS = 15 * 60;
 
 // POST /upload-url
 export async function onRequestPost(context: Context): Promise<Response> {
@@ -39,6 +43,13 @@ export async function onRequestPost(context: Context): Promise<Response> {
       error: 'Unauthorized',
       message: 'Missing user id'
     }, { status: 401 });
+  }
+
+  if (!env.SIGNING_KEY) {
+    return Response.json({
+      error: 'Configuration error',
+      message: 'SIGNING_KEY is not configured'
+    }, { status: 500 });
   }
 
   try {
@@ -94,11 +105,15 @@ export async function onRequestPost(context: Context): Promise<Response> {
 
     // Generate upload URL (Worker proxy pattern)
     // The actual upload will be handled by /api/upload/:key endpoint
-    const uploadUrl = `/api/upload/${encodeURIComponent(imageKey)}`;
+    const uploadPath = `/api/upload/${encodeURIComponent(imageKey)}`;
+    const expires = Math.floor(Date.now() / 1000) + UPLOAD_URL_TTL_SECONDS;
+    const signature = await createUploadSignature(uploadPath, expires, env.SIGNING_KEY);
+    const uploadUrl = `${uploadPath}?expires=${expires}&signature=${signature}`;
 
     return Response.json({
       uploadUrl,
       imageKey,
+      expires,
       uploadLimit: {
         limit: uploadLimit,
         used: currentCount + 1,

@@ -1,14 +1,21 @@
 // R2 Upload Proxy Endpoint
 // PUT /api/upload/:key - Proxy upload to R2 bucket
 
+import { verifyUploadSignature } from '../../_utils';
+
 interface Env {
   USER_CONTENT_BUCKET: any;
+  SIGNING_KEY: string;
   [key: string]: any;
 }
 
 interface Context {
   request: Request;
   env: Env;
+  data?: {
+    user_id?: string;
+    [key: string]: any;
+  };
   params: {
     key: string;
   };
@@ -17,8 +24,58 @@ interface Context {
 // PUT /api/upload/:key
 export async function onRequestPut(context: Context): Promise<Response> {
   const { request, env, params } = context;
+  const user_id = context.data?.user_id;
 
   try {
+    if (!user_id) {
+      return Response.json({
+        error: 'Unauthorized',
+        message: 'Missing user id'
+      }, { status: 401 });
+    }
+
+    if (!env.SIGNING_KEY) {
+      return Response.json({
+        error: 'Configuration error',
+        message: 'SIGNING_KEY is not configured'
+      }, { status: 500 });
+    }
+
+    const url = new URL(request.url);
+    const expiresParam = url.searchParams.get('expires');
+    const signature = url.searchParams.get('signature');
+
+    if (!expiresParam || !signature) {
+      return Response.json({
+        error: 'Unauthorized',
+        message: 'Missing upload signature'
+      }, { status: 401 });
+    }
+
+    const expires = Number.parseInt(expiresParam, 10);
+    if (!Number.isFinite(expires)) {
+      return Response.json({
+        error: 'Unauthorized',
+        message: 'Invalid upload signature'
+      }, { status: 401 });
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    if (expires < now) {
+      return Response.json({
+        error: 'Unauthorized',
+        message: 'Upload signature expired'
+      }, { status: 401 });
+    }
+
+    const isValid = await verifyUploadSignature(url.pathname, expires, signature, env.SIGNING_KEY);
+    if (!isValid) {
+      return Response.json({
+        error: 'Unauthorized',
+        message: 'Invalid upload signature'
+      }, { status: 401 });
+    }
+
     // Decode the image key from URL parameter
     const imageKey = decodeURIComponent(params.key);
 
@@ -28,6 +85,13 @@ export async function onRequestPut(context: Context): Promise<Response> {
         error: 'Invalid image key',
         message: 'Image key must start with "users/"'
       }, { status: 400 });
+    }
+
+    if (!imageKey.startsWith(`users/${user_id}/`)) {
+      return Response.json({
+        error: 'Unauthorized',
+        message: 'Image key does not match user id'
+      }, { status: 401 });
     }
 
     // Get content type from request headers
