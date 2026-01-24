@@ -3,6 +3,7 @@
 
 interface Env {
   DB: any;
+  USER_CONTENT_BUCKET: any;
   [key: string]: any;
 }
 
@@ -72,6 +73,7 @@ export async function onRequestDelete(context: Context): Promise<Response> {
     }
 
     let deletedCount = 0;
+    const deletedImageKeys = new Set<string>();
 
     // Delete item from each date
     for (const currentDate of datesToUpdate) {
@@ -89,6 +91,12 @@ export async function onRequestDelete(context: Context): Promise<Response> {
 
       // Filter out the item to delete
       const filteredItems = orderedItems.filter((item: any) => item.id !== itemId);
+
+      for (const item of orderedItems) {
+        if (item.id === itemId && typeof item.imageKey === 'string' && item.imageKey.length > 0) {
+          deletedImageKeys.add(item.imageKey);
+        }
+      }
 
       if (filteredItems.length === orderedItems.length) {
         // Item not found in this date's record
@@ -117,6 +125,10 @@ export async function onRequestDelete(context: Context): Promise<Response> {
         error: 'Item not found',
         message: `Item ${itemId} not found in specified date(s)`
       }, { status: 404 });
+    }
+
+    if (deletedImageKeys.size > 0) {
+      await deleteUnusedImages(env, user_id, deletedImageKeys);
     }
 
     return Response.json({
@@ -148,4 +160,44 @@ function generateDateRange(startDate: string, endDate: string): string[] {
   }
 
   return dates;
+}
+
+async function deleteUnusedImages(env: Env, userId: string, imageKeys: Set<string>): Promise<void> {
+  if (!env.USER_CONTENT_BUCKET) {
+    return;
+  }
+
+  const remainingImageKeys = await collectImageKeys(env.DB, userId);
+
+  for (const imageKey of imageKeys) {
+    if (remainingImageKeys.has(imageKey)) {
+      continue;
+    }
+    if (!imageKey.startsWith(`users/${userId}/`)) {
+      continue;
+    }
+    try {
+      await env.USER_CONTENT_BUCKET.delete(imageKey);
+    } catch (error) {
+      console.error('Error deleting image from R2:', error);
+    }
+  }
+}
+
+async function collectImageKeys(db: any, userId: string): Promise<Set<string>> {
+  const remaining = new Set<string>();
+  const { results } = await db.prepare(
+    'SELECT ordered_items FROM diary_records WHERE user_id = ?'
+  ).bind(userId).all();
+
+  for (const row of results as { ordered_items: string }[]) {
+    const orderedItems = JSON.parse(row.ordered_items);
+    for (const item of orderedItems) {
+      if (typeof item.imageKey === 'string' && item.imageKey.length > 0) {
+        remaining.add(item.imageKey);
+      }
+    }
+  }
+
+  return remaining;
 }
