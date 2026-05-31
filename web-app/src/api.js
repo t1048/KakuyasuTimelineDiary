@@ -347,3 +347,18 @@ export const generateRecurringInstancesForDate = (date) => {
   return instances;
 };
 
+// リアクションのトグル（追加/削除）
+export const toggleReaction = async ({ date, itemId, emoji }) => {
+  const headers = await getHeaders();
+  const res = await fetch(`${API_URL}/reactions`, {
+    method: 'POST',
+    headers: headers,
+    body: JSON.stringify({ date, itemId, emoji }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.message || errorData.error || 'Failed to toggle reaction');
+  }
+  return res.json();
+};
+

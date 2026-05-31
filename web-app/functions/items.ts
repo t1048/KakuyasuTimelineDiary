@@ -124,6 +124,7 @@ export async function onRequestPost(context: Context): Promise<Response> {
       name: body.name || '',
       published: new Date().toISOString(),
       tag: body.tag || [],
+      reactions: body.reactions || {},
       startTime: body.startTime || null,
       endTime: body.endTime || null,
       imageKey: body.imageKey || null,

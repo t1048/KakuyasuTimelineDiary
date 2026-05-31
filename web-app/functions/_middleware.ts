@@ -34,6 +34,7 @@ export async function onRequest(context: Context): Promise<Response> {
     url.pathname.startsWith('/items') || 
     url.pathname === '/upload-url' || 
     url.pathname === '/upload-status' ||
+    url.pathname === '/reactions' ||
     url.pathname.startsWith('/api/');
 
   if (!isApiRequest) {

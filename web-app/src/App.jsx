@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Amplify } from 'aws-amplify';
 import { useAuthenticator } from '@aws-amplify/ui-react';
 import '@aws-amplify/ui-react/styles.css';
-import { getItems, createItem, deleteItem, getConsent, setConsent, getTemplates, saveTemplate, deleteTemplate, generateRecurringInstancesForDate, getOutbox, enqueueOutboxEntry, removeOutboxEntry, updateOutboxEntry, getUploadUrl, uploadFile, fetchFile } from './api';
+import { getItems, createItem, deleteItem, getConsent, setConsent, getTemplates, saveTemplate, deleteTemplate, generateRecurringInstancesForDate, getOutbox, enqueueOutboxEntry, removeOutboxEntry, updateOutboxEntry, getUploadUrl, uploadFile, fetchFile, toggleReaction } from './api';
 import { Calendar, Clock, Trash2, Plus, X, LogOut, FileText, ChevronLeft, ChevronRight, KeyRound, AlertCircle, List, Settings, Pencil, Hash, CalendarDays, Camera, Send } from 'lucide-react';
 import './App.css';
 
@@ -93,6 +93,9 @@ function App() {
   const [isChatSubmitting, setIsChatSubmitting] = useState(false);
   const [selectedImage, setSelectedImage] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
+  const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
+  const [emojiPickerTarget, setEmojiPickerTarget] = useState(null); // { date, itemId }
+  const [reactionSubmitting, setReactionSubmitting] = useState({}); // { [itemId+emoji]: boolean }
   const notificationSupported = typeof window !== 'undefined' && 'Notification' in window;
   // データキャッシュ: キーは "YYYY-MM" 形式
   const [dataCache, setDataCache] = useState({});
@@ -1327,6 +1330,70 @@ function App() {
     reader.readAsDataURL(file);
   };
 
+  const handleReactionToggle = async (date, itemId, emoji) => {
+    const key = `${itemId}:${emoji}`;
+    if (reactionSubmitting[key]) return;
+
+    setReactionSubmitting(prev => ({ ...prev, [key]: true }));
+
+    // Optimistic update
+    setRecords(prev => prev.map(record => {
+      if (record.date !== date) return record;
+      const updatedItems = record.orderedItems.map(item => {
+        if (item.id !== itemId) return item;
+        const reactions = { ...(item.reactions || {}) };
+        if (reactions[emoji] && reactions[emoji] > 0) {
+          reactions[emoji] -= 1;
+          if (reactions[emoji] <= 0) delete reactions[emoji];
+        } else {
+          reactions[emoji] = (reactions[emoji] || 0) + 1;
+        }
+        return { ...item, reactions };
+      });
+      return { ...record, orderedItems: updatedItems };
+    }));
+
+    try {
+      await toggleReaction({ date, itemId, emoji });
+    } catch (error) {
+      console.error('Reaction toggle failed:', error);
+      // Rollback on error
+      setRecords(prev => prev.map(record => {
+        if (record.date !== date) return record;
+        const updatedItems = record.orderedItems.map(item => {
+          if (item.id !== itemId) return item;
+          const reactions = { ...(item.reactions || {}) };
+          if (reactions[emoji] && reactions[emoji] > 0) {
+            reactions[emoji] -= 1;
+            if (reactions[emoji] <= 0) delete reactions[emoji];
+          } else {
+            reactions[emoji] = (reactions[emoji] || 0) + 1;
+          }
+          return { ...item, reactions };
+        });
+        return { ...record, orderedItems: updatedItems };
+      }));
+    } finally {
+      setReactionSubmitting(prev => ({ ...prev, [key]: false }));
+    }
+  };
+
+  const handleAddReaction = (date, itemId, emoji) => {
+    handleReactionToggle(date, itemId, emoji);
+    setEmojiPickerOpen(false);
+    setEmojiPickerTarget(null);
+  };
+
+  const openEmojiPicker = (date, itemId) => {
+    setEmojiPickerTarget({ date, itemId });
+    setEmojiPickerOpen(true);
+  };
+
+  const closeEmojiPicker = () => {
+    setEmojiPickerOpen(false);
+    setEmojiPickerTarget(null);
+  };
+
   const handleChatSubmit = async (e) => {
     if (e) e.preventDefault();
     if ((!chatInput.trim() && !selectedImage) || isChatSubmitting) return;
@@ -1916,8 +1983,60 @@ function App() {
                             </div>
                           )}
                         </div>
+                        <div className="reaction-bar">
+                          {Object.entries(item.reactions || {}).map(([emoji, count]) => (
+                            <button
+                              key={emoji}
+                              className={`reaction-btn ${count > 0 ? 'active' : ''}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleReactionToggle(item.date, item.id, emoji);
+                              }}
+                              disabled={reactionSubmitting[`${item.id}:${emoji}`]}
+                              title={emoji}
+                            >
+                              <span className="reaction-emoji">{emoji}</span>
+                              <span className="reaction-count">{count}</span>
+                            </button>
+                          ))}
+                          <button
+                            className="reaction-btn add-reaction"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openEmojiPicker(item.date, item.id);
+                            }}
+                            title="リアクションを追加"
+                          >
+                            <Plus size={14} />
+                          </button>
+                        </div>
                       </div>
                     ))}
+
+                    {/* Emoji Picker */}
+                    {emojiPickerOpen && emojiPickerTarget && (
+                      <div className="emoji-picker-overlay" onClick={closeEmojiPicker}>
+                        <div className="emoji-picker" onClick={(e) => e.stopPropagation()}>
+                          <div className="emoji-picker-header">
+                            <span>リアクション</span>
+                            <button className="emoji-picker-close" onClick={closeEmojiPicker}>
+                              <X size={16} />
+                            </button>
+                          </div>
+                          <div className="emoji-picker-grid">
+                            {['👍','❤️','😆','🤔','😢','🎉','🚀','💯','🔥','🍺','💤','😋','👏','😍','🤣','😭','🙏','✨','💪','🌟'].map(emoji => (
+                              <button
+                                key={emoji}
+                                className="emoji-picker-item"
+                                onClick={() => handleAddReaction(emojiPickerTarget.date, emojiPickerTarget.itemId, emoji)}
+                              >
+                                {emoji}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )
               ) : viewMode === 'week' ? (
@@ -2004,13 +2123,6 @@ function App() {
                 </button>
               </div>
             )}
-            <div className="quick-tags">
-              <button className="quick-tag-btn" onClick={() => setChatInput(prev => prev + ' #🔥')}>🔥</button>
-              <button className="quick-tag-btn" onClick={() => setChatInput(prev => prev + ' #🍺')}>🍺</button>
-              <button className="quick-tag-btn" onClick={() => setChatInput(prev => prev + ' #💤')}>💤</button>
-              <button className="quick-tag-btn" onClick={() => setChatInput(prev => prev + ' #😋')}>😋</button>
-              <button className="quick-tag-btn" onClick={() => setChatInput(prev => prev + ' #散歩')}>🚶</button>
-            </div>
             <form className="chat-bar" onSubmit={handleChatSubmit}>
               <label className="chat-icon-btn" style={{ cursor: 'pointer' }}>
                 <Camera size={20} />
